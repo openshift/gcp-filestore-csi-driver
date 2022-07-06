@@ -1,14 +1,3 @@
 approvers:
-  - mattcary
-  - msau42
-  - saad-ali
-  - saikat-royc
-  - leiyiz
-reviewers:
-  - davidz627
-  - jingxu97
-  - mattcary
-  - msau42
-  - saad-ali
-  - saikat-royc
-  - leiyiz
+- openshift-storage-maintainers
+component: "Storage"
