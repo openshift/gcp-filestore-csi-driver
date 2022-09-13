@@ -23,7 +23,7 @@ import (
 
 	"github.com/google/uuid"
 	filev1beta1 "google.golang.org/api/file/v1beta1"
-	filev1beta1multishare "google.golang.org/api/file/v1beta1multishare"
+	filev1beta1multishare "google.golang.org/api/file/v1beta1"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/genproto/googleapis/rpc/code"
 	"google.golang.org/grpc/codes"
@@ -35,6 +35,7 @@ const (
 	defaultRegion     = "us-central1"
 	defaultTier       = "BASIC_HDD"
 	defaultCapacityGb = 1024
+	defaultNetwork    = "default"
 )
 
 type fakeServiceManager struct {
@@ -125,6 +126,7 @@ func (manager *fakeServiceManager) ListInstances(ctx context.Context, obj *Servi
 			Tier:     defaultTier,
 			Network: Network{
 				ReservedIpRange: "192.168.92.32/29",
+				Name:            defaultNetwork,
 			},
 			State: "READY",
 		},
@@ -135,6 +137,7 @@ func (manager *fakeServiceManager) ListInstances(ctx context.Context, obj *Servi
 			Tier:     defaultTier,
 			Network: Network{
 				ReservedIpRange: "192.168.92.40/29",
+				Name:            defaultNetwork,
 			},
 			State: "READY",
 		},
@@ -295,17 +298,14 @@ func (manager *fakeServiceManager) ListMultishareInstances(ctx context.Context, 
 func (manager *fakeServiceManager) StartCreateMultishareInstanceOp(ctx context.Context, obj *MultishareInstance) (*filev1beta1multishare.Operation, error) {
 	instance := &MultishareInstance{
 		Project:       defaultProject,
-		Location:      defaultRegion,
+		Location:      obj.Location,
 		Name:          obj.Name,
 		Tier:          obj.Tier,
 		CapacityBytes: obj.CapacityBytes,
-		Network: Network{
-			Name:            obj.Network.Name,
-			Ip:              obj.Network.Ip,
-			ReservedIpRange: obj.Network.ReservedIpRange,
-		},
-		Labels: obj.Labels,
-		State:  "READY",
+		Network:       obj.Network,
+		KmsKeyName:    obj.KmsKeyName,
+		Labels:        obj.Labels,
+		State:         "READY",
 	}
 	manager.createdMultishareInstance[obj.Name] = instance
 	meta := &filev1beta1multishare.OperationMetadata{
