@@ -25,7 +25,7 @@ import (
 	"testing"
 
 	csi "github.com/container-storage-interface/spec/lib/go/csi"
-	filev1beta1multishare "google.golang.org/api/file/v1beta1multishare"
+	filev1beta1multishare "google.golang.org/api/file/v1beta1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	cloud "sigs.k8s.io/gcp-filestore-csi-driver/pkg/cloud_provider"
 	"sigs.k8s.io/gcp-filestore-csi-driver/pkg/cloud_provider/file"
@@ -35,6 +35,7 @@ import (
 const (
 	testDriverName           = "test.filestore"
 	testDrivernameLabelValue = "test_filestore"
+	testClusterName          = "test-cluster"
 	testPVCName              = "testPVC"
 	testPVCNamespace         = "testNamespace"
 	testPVName               = "testPV"
@@ -53,7 +54,16 @@ func initTestMultishareController(t *testing.T) *MultishareController {
 	if err != nil {
 		t.Fatalf("Failed to get cloud provider: %v", err)
 	}
-	return NewMultishareController(initTestDriver(t), fileService, cloudProvider, util.NewVolumeLocks(), "")
+	config := &controllerServerConfig{
+		driver:          initTestDriver(t),
+		fileService:     fileService,
+		cloud:           cloudProvider,
+		volumeLocks:     util.NewVolumeLocks(),
+		ecfsDescription: "",
+		isRegional:      true,
+		clusterName:     testClusterName,
+	}
+	return NewMultishareController(config)
 }
 
 func TestPickRegion(t *testing.T) {
@@ -307,7 +317,9 @@ func TestExtractInstanceLabels(t *testing.T) {
 			name:   "empty params",
 			driver: testDriverName,
 			expectedLabel: map[string]string{
-				tagKeyCreatedBy: testDrivernameLabelValue,
+				tagKeyCreatedBy:       testDrivernameLabelValue,
+				tagKeyClusterName:     testClusterName,
+				tagKeyClusterLocation: testLocation,
 			},
 		},
 		{
@@ -322,12 +334,14 @@ func TestExtractInstanceLabels(t *testing.T) {
 				util.ParamMultishareInstanceScLabelKey: "testsc",
 				"a":                                    "b",
 				"c":                                    "d",
+				tagKeyClusterName:                      testClusterName,
+				tagKeyClusterLocation:                  testLocation,
 			},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			label, err := extractInstanceLabels(tc.params, tc.driver)
+			label, err := extractInstanceLabels(tc.params, tc.driver, testClusterName, testLocation)
 			if tc.expectErr && err == nil {
 				t.Error("expected error, got none")
 			}
@@ -454,6 +468,8 @@ func TestGenerateNewMultishareInstance(t *testing.T) {
 					"a":                                    "b",
 					"c":                                    "d",
 					tagKeyCreatedBy:                        "test-driver",
+					tagKeyClusterLocation:                  testRegion,
+					tagKeyClusterName:                      testClusterName,
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
 				},
 			},
@@ -467,7 +483,7 @@ func TestGenerateNewMultishareInstance(t *testing.T) {
 				t.Error("expected error, got none")
 			}
 			if !tc.expectErr && err != nil {
-				t.Error("unexpected error")
+				t.Errorf("unexpected error: %q", err)
 			}
 			if !reflect.DeepEqual(filer, tc.expectedInstance) {
 				t.Errorf("got filer %+v, want %+v", filer, tc.expectedInstance)
@@ -759,11 +775,15 @@ func TestMultishareCreateVolume(t *testing.T) {
 					Project:  "test-project",
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+						tagKeyClusterLocation:                  testLocation,
+						tagKeyClusterName:                      "",
 					},
 					CapacityBytes: 1 * util.Tb,
-					Tier:          "Enterprise",
+					Tier:          "enterprise",
 					Network: file.Network{
-						Ip: testIP,
+						Ip:          testIP,
+						Name:        defaultNetwork,
+						ConnectMode: directPeering,
 					},
 					State: "READY",
 				},
@@ -773,11 +793,15 @@ func TestMultishareCreateVolume(t *testing.T) {
 					Project:  "test-project",
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+						tagKeyClusterLocation:                  testLocation,
+						tagKeyClusterName:                      "",
 					},
 					CapacityBytes: 1 * util.Tb,
-					Tier:          "Enterprise",
+					Tier:          "enterprise",
 					Network: file.Network{
-						Ip: testIP,
+						Ip:          testIP,
+						Name:        defaultNetwork,
+						ConnectMode: directPeering,
 					},
 					State: "READY",
 				},
@@ -796,6 +820,7 @@ func TestMultishareCreateVolume(t *testing.T) {
 				},
 				Parameters: map[string]string{
 					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					paramTier:                      "enterprise",
 				},
 				VolumeCapabilities: []*csi.VolumeCapability{
 					{
@@ -827,6 +852,8 @@ func TestMultishareCreateVolume(t *testing.T) {
 					Project:  "test-project",
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+						tagKeyClusterLocation:                  testLocation,
+						tagKeyClusterName:                      "",
 					},
 					CapacityBytes: 1 * util.Tb,
 					Tier:          "Enterprise",
@@ -872,6 +899,8 @@ func TestMultishareCreateVolume(t *testing.T) {
 					Project:  "test-project",
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+						tagKeyClusterLocation:                  testLocation,
+						tagKeyClusterName:                      "",
 					},
 					CapacityBytes: 1 * util.Tb,
 					Tier:          "Enterprise",
@@ -955,7 +984,14 @@ func TestMultishareCreateVolume(t *testing.T) {
 			}
 			cloudProvider, _ := cloud.NewFakeCloud()
 			cloudProvider.File = s
-			mcs := NewMultishareController(initTestDriver(t), s, cloudProvider, util.NewVolumeLocks(), "")
+			config := &controllerServerConfig{
+				driver:          initTestDriver(t),
+				fileService:     s,
+				cloud:           cloudProvider,
+				volumeLocks:     util.NewVolumeLocks(),
+				ecfsDescription: "",
+			}
+			mcs := NewMultishareController(config)
 			resp, err := mcs.CreateVolume(context.Background(), tc.req)
 			if tc.errorExpected && err == nil {
 				t.Errorf("expected error not found")
@@ -1152,7 +1188,14 @@ func TestMultishareDeleteVolume(t *testing.T) {
 			}
 			cloudProvider, _ := cloud.NewFakeCloud()
 			cloudProvider.File = s
-			mcs := NewMultishareController(initTestDriver(t), s, cloudProvider, util.NewVolumeLocks(), "")
+			config := &controllerServerConfig{
+				driver:          initTestDriver(t),
+				fileService:     s,
+				cloud:           cloudProvider,
+				volumeLocks:     util.NewVolumeLocks(),
+				ecfsDescription: "",
+			}
+			mcs := NewMultishareController(config)
 			resp, err := mcs.DeleteVolume(context.Background(), tc.req)
 			if tc.errorExpected && err == nil {
 				t.Errorf("expected error not found")
@@ -1550,7 +1593,14 @@ func TestMultishareControllerExpandVolume(t *testing.T) {
 			}
 			cloudProvider, _ := cloud.NewFakeCloud()
 			cloudProvider.File = s
-			mcs := NewMultishareController(initTestDriver(t), s, cloudProvider, util.NewVolumeLocks(), "")
+			config := &controllerServerConfig{
+				driver:          initTestDriver(t),
+				fileService:     s,
+				cloud:           cloudProvider,
+				volumeLocks:     util.NewVolumeLocks(),
+				ecfsDescription: "",
+			}
+			mcs := NewMultishareController(config)
 			resp, err := mcs.ControllerExpandVolume(context.Background(), tc.req)
 			if tc.errorExpected && err == nil {
 				t.Errorf("expected error not found")

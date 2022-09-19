@@ -29,12 +29,13 @@ import (
 	"github.com/golang/glog"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog"
 	"sigs.k8s.io/gcp-filestore-csi-driver/pkg/util"
 
 	filev1beta1 "google.golang.org/api/file/v1beta1"
-	filev1beta1multishare "google.golang.org/api/file/v1beta1multishare"
+	filev1beta1multishare "google.golang.org/api/file/v1beta1"
 )
 
 type PollOpts struct {
@@ -155,6 +156,7 @@ const (
 	// Patch update masks
 	fileShareUpdateMask          = "file_shares"
 	multishareCapacityUpdateMask = "capacity_gb"
+	prodBasePath                 = "https://file.googleapis.com/"
 )
 
 var _ Service = &gcfsServiceManager{}
@@ -175,7 +177,8 @@ func NewGCFSService(version string, client *http.Client, endpoint string) (Servi
 
 	basepath := createFilestoreEndpointUrlBasePath(endpoint)
 	glog.Infof("Using endpoint %q for multishare", basepath)
-	fileMultishareService, err := filev1beta1multishare.NewService(ctx, basepath, option.WithHTTPClient(client))
+	fileMultishareService, err := filev1beta1multishare.NewService(ctx, option.WithHTTPClient(client))
+	fileMultishareService.BasePath = basepath
 	if err != nil {
 		return nil, err
 	}
@@ -608,26 +611,30 @@ func IsNotFoundErr(err error) bool {
 	return false
 }
 
-// IsUserError returns true if the error is a googleapi.Error with
-// Error 403: Permission Denied, Error 400: Bad Request
-func IsUserError(err error) bool {
-	userErrors := map[int]bool{
-		http.StatusForbidden:  true,
-		http.StatusBadRequest: true,
+// IsUserError returns a pointer to the grpc error code that maps to the http
+// error code for the passed in user googleapi error. Returns nil if the
+// given error is not a googleapi error caused by the user. The following
+// http error codes are considered user errors:
+// (1) http 400 Bad Request, returns grpc InvalidArgument,
+// (2) http 403 Forbidden, returns grpc PermissionDenied,
+// (3) http 404 Not Found, returns grpc NotFound
+// (4) http 429 Too Many Requests, returns grpc ResourceExhausted
+func IsUserError(err error) *codes.Code {
+	apiErr, ok := err.(*googleapi.Error)
+	if !ok {
+		return nil
 	}
-	if apiErr, ok := err.(*googleapi.Error); ok && userErrors[apiErr.Code] {
-		return true
-	}
-	return false
-}
 
-// IsTooManyRequestError returns true if the error is a googleapi.Error with
-// Error 429: Status Too Many Requests.
-func IsTooManyRequestError(err error) bool {
-	if apierr, ok := err.(*googleapi.Error); ok && apierr.Code == http.StatusTooManyRequests {
-		return true
+	userErrors := map[int]codes.Code{
+		http.StatusForbidden:       codes.PermissionDenied,
+		http.StatusBadRequest:      codes.InvalidArgument,
+		http.StatusTooManyRequests: codes.ResourceExhausted,
+		http.StatusNotFound:        codes.NotFound,
 	}
-	return false
+	if code, ok := userErrors[apiErr.Code]; ok {
+		return &code
+	}
+	return nil
 }
 
 // This function returns the backup URI, the region that was picked to be the backup resource location and error.
@@ -1036,7 +1043,7 @@ func createFilestoreEndpointUrlBasePath(endpoint string) string {
 	if endpoint != "" {
 		return "https://" + endpoint + "/"
 	} else {
-		return ""
+		return prodBasePath
 	}
 }
 

@@ -42,23 +42,26 @@ const (
 
 // MultishareController handles CSI calls for volumes which use Filestore multishare instances.
 type MultishareController struct {
-	controllerServer *controllerServer
-	driver           *GCFSDriver
-	fileService      file.Service
-	cloud            *cloud.Cloud
-	opsManager       *MultishareOpsManager
-	volumeLocks      *util.VolumeLocks
-	ecfsDescription  string
+	driver          *GCFSDriver
+	fileService     file.Service
+	cloud           *cloud.Cloud
+	opsManager      *MultishareOpsManager
+	volumeLocks     *util.VolumeLocks
+	ecfsDescription string
+	isRegional      bool
+	clustername     string
 }
 
-func NewMultishareController(driver *GCFSDriver, fileService file.Service, cloud *cloud.Cloud, volumeLock *util.VolumeLocks, ecfsDescription string) *MultishareController {
+func NewMultishareController(config *controllerServerConfig) *MultishareController {
 	return &MultishareController{
-		opsManager:      NewMultishareOpsManager(cloud),
-		driver:          driver,
-		fileService:     fileService,
-		cloud:           cloud,
-		volumeLocks:     volumeLock,
-		ecfsDescription: ecfsDescription,
+		opsManager:      NewMultishareOpsManager(config.cloud),
+		driver:          config.driver,
+		fileService:     config.fileService,
+		cloud:           config.cloud,
+		volumeLocks:     config.volumeLocks,
+		ecfsDescription: config.ecfsDescription,
+		isRegional:      config.isRegional,
+		clustername:     config.clusterName,
 	}
 }
 
@@ -80,9 +83,12 @@ func (m *MultishareController) CreateVolume(ctx context.Context, req *csi.Create
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	_, err = getShareRequestCapacity(req.GetCapacityRange())
+	reqBytes, err := getShareRequestCapacity(req.GetCapacityRange())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if !util.IsAligned(reqBytes, util.Gb) {
+		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("requested size(bytes) %d is not a multiple of 1GiB", reqBytes))
 	}
 	if acquired := m.volumeLocks.TryAcquire(name); !acquired {
 		return nil, status.Errorf(codes.Aborted, util.VolumeOperationAlreadyExistsFmt, name)
@@ -93,33 +99,6 @@ func (m *MultishareController) CreateVolume(ctx context.Context, req *csi.Create
 	instance, err := m.generateNewMultishareInstance(util.NewMultishareInstancePrefix+string(uuid.NewUUID()), req)
 	if err != nil {
 		return nil, err
-	}
-
-	param := req.GetParameters()
-	// If we are creating a new instance, we need pick an unused CIDR range from reserved-ipv4-cidr
-	// If the param was not provided, we default reservedIPRange to "" and cloud provider takes care of the allocation
-	if instance.Network.ConnectMode == privateServiceAccess {
-		if reservedIPRange, ok := param[paramReservedIPRange]; ok {
-			instance.Network.ReservedIpRange = reservedIPRange
-		}
-	} else if reservedIPV4CIDR, ok := param[paramReservedIPV4CIDR]; ok {
-		reservedIPRange, err := m.controllerServer.reserveIPRange(ctx, &file.ServiceInstance{
-			Project:  instance.Project,
-			Name:     instance.Name,
-			Location: instance.Location,
-			Tier:     instance.Tier,
-		}, reservedIPV4CIDR)
-
-		// Possible cases are 1) CreateInstanceAborted, 2)CreateInstance running in background
-		// The ListInstances response will contain the reservedIPRange if the operation was started
-		// In case of abort, the CIDR IP is released and available for reservation
-		defer m.controllerServer.config.ipAllocator.ReleaseIPRange(reservedIPRange)
-		if err != nil {
-			return nil, err
-		}
-
-		// Adding the reserved IP range to the instance object
-		instance.Network.ReservedIpRange = reservedIPRange
 	}
 
 	workflow, share, err := m.opsManager.setupEligibleInstanceAndStartWorkflow(ctx, req, instance)
@@ -273,7 +252,9 @@ func (m *MultishareController) ControllerExpandVolume(ctx context.Context, req *
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-
+	if !util.IsAligned(reqBytes, util.Gb) {
+		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("requested size(bytes) %d is not a multiple of 1GiB", reqBytes))
+	}
 	_, project, location, instanceName, shareName, err := parseMultishareVolId(req.VolumeId)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -417,7 +398,14 @@ func (m *MultishareController) generateNewMultishareInstance(instanceName string
 		return nil, status.Errorf(codes.InvalidArgument, fmt.Sprintf("tier %q not supported for multishare volumes", tier))
 	}
 
-	labels, err := extractInstanceLabels(req.GetParameters(), m.driver.config.Name)
+	location := m.cloud.Zone
+	if m.isRegional {
+		location, _ = util.GetRegionFromZone(location)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to get region for regional cluster: %v", err.Error())
+		}
+	}
+	labels, err := extractInstanceLabels(req.GetParameters(), m.driver.config.Name, m.clustername, location)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
@@ -476,7 +464,7 @@ func (m *MultishareController) pickRegion(top *csi.TopologyRequirement) (string,
 	return region, nil
 }
 
-func extractInstanceLabels(parameters map[string]string, driverName string) (map[string]string, error) {
+func extractInstanceLabels(parameters map[string]string, driverName, clusterName, location string) (map[string]string, error) {
 	instanceLabels := make(map[string]string)
 	userProvidedLabels := make(map[string]string)
 	for k, v := range parameters {
@@ -497,6 +485,8 @@ func extractInstanceLabels(parameters map[string]string, driverName string) (map
 	}
 
 	instanceLabels[tagKeyCreatedBy] = strings.ReplaceAll(driverName, ".", "_")
+	instanceLabels[tagKeyClusterName] = clusterName
+	instanceLabels[tagKeyClusterLocation] = location
 	finalInstanceLabels, err := mergeLabels(userProvidedLabels, instanceLabels)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
