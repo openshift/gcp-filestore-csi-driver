@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 var (
@@ -115,9 +115,10 @@ func mustParseVersion(version string) *version {
 }
 
 // Helper function to compare versions.
-//  -1 -- if left  < right
-//   0 -- if left == right
-//   1 -- if left  > right
+//
+//	-1 -- if left  < right
+//	 0 -- if left == right
+//	 1 -- if left  > right
 func (v *version) compare(right *version) int {
 	for i, b := range v.version {
 		if b > right.version[i] {
