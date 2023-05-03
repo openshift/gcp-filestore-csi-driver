@@ -71,6 +71,7 @@ type MultishareInstance struct {
 	State              string
 	KmsKeyName         string
 	Description        string
+	MaxShareCount      int
 }
 
 func (i *MultishareInstance) String() string {
@@ -108,8 +109,9 @@ type Network struct {
 }
 
 type BackupInfo struct {
-	Backup             *filev1beta1.Backup
-	SourceVolumeHandle string
+	Backup         *filev1beta1.Backup
+	SourceInstance string
+	SourceShare    string
 }
 
 type Service interface {
@@ -158,7 +160,8 @@ const (
 	instanceURIFmt  = locationURIFmt + "/instances/%s"
 	operationURIFmt = locationURIFmt + "/operations/%s"
 	backupURIFmt    = locationURIFmt + "/backups/%s"
-	shareURIFmt     = instanceURIFmt + "/shares/%s"
+	shareSuffixFmt  = "/shares/%s"
+	shareURIFmt     = instanceURIFmt + shareSuffixFmt
 	// Patch update masks
 	fileShareUpdateMask          = "file_shares"
 	multishareCapacityUpdateMask = "capacity_gb"
@@ -172,27 +175,37 @@ var (
 	shareUriRegex    = regexp.MustCompile(`^projects/([^/]+)/locations/([^/]+)/instances/([^/]+)/shares/([^/]+)$`)
 )
 
-func NewGCFSService(version string, client *http.Client, endpoint string) (Service, error) {
+func NewGCFSService(version string, client *http.Client, primaryFilestoreServiceEndpoint, testFilestoreServiceEndpoint string) (Service, error) {
 	ctx := context.Background()
 
-	fileService, err := filev1beta1.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		return nil, err
-	}
-	fileService.UserAgent = fmt.Sprintf("Google Cloud Filestore CSI Driver/%s (%s %s)", version, runtime.GOOS, runtime.GOARCH)
-
-	basepath, err := createFilestoreEndpointUrlBasePath(endpoint)
-	if err != nil {
-		return nil, err
+	fsOpts := []option.ClientOption{
+		option.WithHTTPClient(client),
+		option.WithUserAgent(fmt.Sprintf("Google Cloud Filestore CSI Driver/%s (%s %s)", version, runtime.GOOS, runtime.GOARCH)),
 	}
 
-	klog.Infof("Using endpoint %q for multishare", basepath)
-	fileMultishareService, err := filev1beta1multishare.NewService(ctx, option.WithHTTPClient(client))
-	fileMultishareService.BasePath = basepath
+	if primaryFilestoreServiceEndpoint != "" {
+		fsOpts = append(fsOpts, option.WithEndpoint(primaryFilestoreServiceEndpoint))
+	} else if testFilestoreServiceEndpoint != "" {
+		endpoint, err := createFilestoreEndpointUrlBasePath(testFilestoreServiceEndpoint)
+		if err != nil {
+			return nil, err
+		}
+		fsOpts = append(fsOpts, option.WithEndpoint(endpoint))
+	}
+
+	fileService, err := filev1beta1.NewService(ctx, fsOpts...)
 	if err != nil {
 		return nil, err
 	}
-	fileMultishareService.UserAgent = fmt.Sprintf("Google Cloud Filestore CSI Driver/%s (%s %s)", version, runtime.GOOS, runtime.GOARCH)
+
+	klog.Infof("Using endpoint %q for non-multishare filestore", fileService.BasePath)
+
+	fileMultishareService, err := filev1beta1multishare.NewService(ctx, fsOpts...)
+	if err != nil {
+		return nil, err
+	}
+
+	klog.Infof("Using endpoint %q for multishare filestore", fileMultishareService.BasePath)
 
 	return &gcfsServiceManager{
 		fileService:                      fileService,
@@ -327,7 +340,7 @@ func (manager *gcfsServiceManager) GetInstance(ctx context.Context, obj *Service
 }
 
 func cloudInstanceToServiceInstance(instance *filev1beta1.Instance) (*ServiceInstance, error) {
-	project, location, name, err := getInstanceNameFromURI(instance.Name)
+	project, location, name, err := GetInstanceNameFromURI(instance.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -496,13 +509,14 @@ func (manager *gcfsServiceManager) GetBackup(ctx context.Context, backupUri stri
 		return nil, err
 	}
 	return &BackupInfo{
-		Backup:             backup,
-		SourceVolumeHandle: backup.SourceInstance,
+		Backup:         backup,
+		SourceInstance: backup.SourceInstance,
+		SourceShare:    backup.SourceFileShare,
 	}, nil
 }
 
 func (manager *gcfsServiceManager) CreateBackup(ctx context.Context, obj *ServiceInstance, backupName string, backupLocation string) (*filev1beta1.Backup, error) {
-	backupUri, region, err := CreateBackpURI(obj, backupName, backupLocation)
+	backupUri, region, err := CreateBackupURI(obj, backupName, backupLocation)
 	if err != nil {
 		return nil, err
 	}
@@ -597,7 +611,7 @@ func backupURI(project, location, name string) string {
 	return fmt.Sprintf(backupURIFmt, project, location, name)
 }
 
-func getInstanceNameFromURI(uri string) (project, location, name string, err error) {
+func GetInstanceNameFromURI(uri string) (project, location, name string, err error) {
 	var uriRegex = regexp.MustCompile(`^projects/([^/]+)/locations/([^/]+)/instances/([^/]+)$`)
 
 	substrings := uriRegex.FindStringSubmatch(uri)
@@ -649,18 +663,75 @@ func IsUserError(err error) *codes.Code {
 	return nil
 }
 
-// This function returns the backup URI, the region that was picked to be the backup resource location and error.
-func CreateBackpURI(obj *ServiceInstance, backupName, backupLocation string) (string, string, error) {
-	region := backupLocation
-	if region == "" {
-		var err error
-		region, err = util.GetRegionFromZone(obj.Location)
-		if err != nil {
-			return "", "", err
-		}
+// IsContextError returns a pointer to the grpc error code DeadlineExceeded
+// if the passed in error contains the "context deadline exceeded" string and returns
+// the grpc error code Canceled if the error contains the "context canceled" string.
+func IsContextError(err error) *codes.Code {
+	if err == nil {
+		return nil
 	}
 
+	errStr := err.Error()
+	if strings.Contains(errStr, context.DeadlineExceeded.Error()) {
+		return util.ErrCodePtr(codes.DeadlineExceeded)
+	}
+	if strings.Contains(errStr, context.Canceled.Error()) {
+		return util.ErrCodePtr(codes.Canceled)
+	}
+	return nil
+}
+
+// PollOpErrorCode returns a pointer to the grpc error code that maps to the http
+// error code for passed in googleapi error. Returns grpc DeadlineExceeded if the
+// given error contains the "context deadline exceeded" string. Returns the grpc Internal error
+// code if the passed in error is neither a user error or a deadline exceeded error.
+func PollOpErrorCode(err error) *codes.Code {
+	if errCode := IsUserError(err); errCode != nil {
+		return errCode
+	}
+	if errCode := IsContextError(err); errCode != nil {
+		return errCode
+	}
+	return util.ErrCodePtr(codes.Internal)
+}
+
+// This function returns the backup URI, the region that was picked to be the backup resource location and error.
+func CreateBackupURI(obj *ServiceInstance, backupName, backupLocation string) (string, string, error) {
+	region, err := deduceRegion(obj, backupLocation)
+	if err != nil {
+		return "", "", err
+	}
+
+	if !hasRegionPattern(region) {
+		return "", "", fmt.Errorf("provided location did not match region pattern: %s", backupLocation)
+	}
 	return backupURI(obj.Project, region, backupName), region, nil
+}
+
+// deduceRegion will either return the provided backupLocation region or deduce
+// from the ServiceInstance
+func deduceRegion(obj *ServiceInstance, backupLocation string) (string, error) {
+	region := backupLocation
+	if region == "" {
+		if hasRegionPattern(obj.Location) {
+			region = obj.Location
+		} else {
+			var err error
+			region, err = util.GetRegionFromZone(obj.Location)
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+	return region, nil
+}
+
+// hasRegionPattern returns true if the give location matches the standard
+// region pattern. This expects regions to look like multiregion-regionsuffix.
+// Example: us-central1
+func hasRegionPattern(location string) bool {
+	regionPattern := regexp.MustCompile("^[^-]+-[^-]+$")
+	return regionPattern.MatchString(location)
 }
 
 func (manager *gcfsServiceManager) HasOperations(ctx context.Context, obj *ServiceInstance, operationType string, done bool) (bool, error) {
@@ -759,17 +830,18 @@ func (manager *gcfsServiceManager) StartCreateMultishareInstanceOp(ctx context.C
 				ConnectMode:     instance.Network.ConnectMode,
 			},
 		},
-		CapacityGb:  util.BytesToGb(instance.CapacityBytes),
-		KmsKeyName:  instance.KmsKeyName,
-		Labels:      instance.Labels,
-		Description: instance.Description,
+		CapacityGb:    util.BytesToGb(instance.CapacityBytes),
+		KmsKeyName:    instance.KmsKeyName,
+		Labels:        instance.Labels,
+		Description:   instance.Description,
+		MaxShareCount: int64(instance.MaxShareCount),
 	}
 
 	op, err := manager.multishareInstancesService.Create(locationURI(instance.Project, instance.Location), targetinstance).InstanceId(instance.Name).Context(ctx).Do()
 	if err != nil {
 		return nil, fmt.Errorf("CreateInstance operation failed: %w", err)
 	}
-	klog.Infof("Started create instance op %s, for instance %q project %q, location %q, tier %q, capacity %v, network %q, ipRange %q, connectMode %q, KmsKeyName %q, labels %v, description %s", op.Name, instance.Name, instance.Project, instance.Location, targetinstance.Tier, targetinstance.CapacityGb, targetinstance.Networks[0].Network, targetinstance.Networks[0].ReservedIpRange, targetinstance.Networks[0].ConnectMode, targetinstance.KmsKeyName, targetinstance.Labels, targetinstance.Description)
+	klog.Infof("Started create instance op %s, for instance %q project %q, location %q, tier %q, capacity %v, network %q, ipRange %q, connectMode %q, KmsKeyName %q, labels %v, description %s, maxShareCount %d", op.Name, instance.Name, instance.Project, instance.Location, targetinstance.Tier, targetinstance.CapacityGb, targetinstance.Networks[0].Network, targetinstance.Networks[0].ReservedIpRange, targetinstance.Networks[0].ConnectMode, targetinstance.KmsKeyName, targetinstance.Labels, targetinstance.Description, targetinstance.MaxShareCount)
 	return op, nil
 }
 
@@ -788,18 +860,10 @@ func (manager *gcfsServiceManager) StartResizeMultishareInstanceOp(ctx context.C
 	targetinstance := &filev1beta1multishare.Instance{
 		MultiShareEnabled: true,
 		Tier:              obj.Tier,
-		Networks: []*filev1beta1multishare.NetworkConfig{
-			{
-				Network:         obj.Network.Name,
-				Modes:           []string{"MODE_IPV4"},
-				ReservedIpRange: obj.Network.ReservedIpRange,
-				ConnectMode:     obj.Network.ConnectMode,
-			},
-		},
-		CapacityGb:  util.BytesToGb(obj.CapacityBytes),
-		KmsKeyName:  obj.KmsKeyName,
-		Labels:      obj.Labels,
-		Description: obj.Description,
+		CapacityGb:        util.BytesToGb(obj.CapacityBytes),
+		KmsKeyName:        obj.KmsKeyName,
+		Labels:            obj.Labels,
+		Description:       obj.Description,
 	}
 	op, err := manager.multishareInstancesService.Patch(instanceuri, targetinstance).UpdateMask(multishareCapacityUpdateMask).Context(ctx).Do()
 	if err != nil {
@@ -908,6 +972,8 @@ func (manager *gcfsServiceManager) ListShares(ctx context.Context, filter *ListF
 			klog.Errorf("list share error: %v for parent uri %q", err, instanceUri)
 			return nil, err
 		}
+
+		klog.V(6).Infof("List Share API call returned %d results in resp.Shares with unreachable %v", len(resp.Shares), resp.Unreachable)
 
 		for _, sobj := range resp.Shares {
 			project, location, instanceName, shareName, err := util.ParseShareURI(sobj.Name)
@@ -1018,7 +1084,7 @@ func cloudInstanceToMultishareInstance(instance *filev1beta1multishare.Instance)
 	if instance == nil {
 		return nil, fmt.Errorf("nil instance")
 	}
-	project, location, name, err := getInstanceNameFromURI(instance.Name)
+	project, location, name, err := GetInstanceNameFromURI(instance.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -1044,6 +1110,7 @@ func cloudInstanceToMultishareInstance(instance *filev1beta1multishare.Instance)
 		MaxCapacityBytes:   instance.MaxCapacityGb * util.Gb,
 		CapacityStepSizeGb: instance.CapacityStepSizeGb,
 		Description:        instance.Description,
+		MaxShareCount:      int(instance.MaxShareCount),
 	}, nil
 }
 
@@ -1108,10 +1175,10 @@ func GenerateMultishareInstanceURI(m *MultishareInstance) (string, error) {
 	}
 
 	if m.Project == "" || m.Location == "" || m.Name == "" {
-		return "", fmt.Errorf("missing parent, project or location in instance")
+		return "", fmt.Errorf("missing project, name or location in instance")
 	}
 
-	return fmt.Sprintf(instanceURIFmt, m.Project, m.Location, m.Name), nil
+	return instanceURI(m.Project, m.Location, m.Name), nil
 }
 
 func GenerateShareURI(s *Share) (string, error) {
@@ -1120,8 +1187,8 @@ func GenerateShareURI(s *Share) (string, error) {
 	}
 
 	if s.Parent.Project == "" || s.Parent.Location == "" || s.Parent.Name == "" || s.Name == "" {
-		return "", fmt.Errorf("missing parent, project or location in share parent")
+		return "", fmt.Errorf("missing parent, project, name or location in share parent")
 	}
 
-	return fmt.Sprintf(shareURIFmt, s.Parent.Project, s.Parent.Location, s.Parent.Name, s.Name), nil
+	return shareURI(s.Parent.Project, s.Parent.Location, s.Parent.Name, s.Name), nil
 }

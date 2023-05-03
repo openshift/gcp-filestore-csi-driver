@@ -14,7 +14,7 @@ dynamically created and mounted by workloads.
 ## Project Status
 Status: GA
 
-Latest image: `k8s.gcr.io/cloud-provider-gcp/gcp-filestore-csi-driver:v1.3.9`
+Latest image: `registry.k8s.io/cloud-provider-gcp/gcp-filestore-csi-driver:v1.4.3`
 
 Also see [known issues](KNOWN_ISSUES.md) and [CHANGELOG](CHANGELOG.md).
 
@@ -23,7 +23,7 @@ This plugin is compatible with CSI version 1.3.0.
 
 ### Kubernetes Compatibility
 The following table captures the compatibility matrix of the core filestore driver binary
-`k8s.gcr.io/cloud-provider-gcp/gcp-filestore-csi-driver`
+`registry.k8s.io/cloud-provider-gcp/gcp-filestore-csi-driver`
 
 | Filestore CSI Driver\Kubernetes Version | 1.16 | 1.17+ |
 | --------------------------------------- | ---- | ----- |
@@ -48,11 +48,15 @@ The following table captures the compatibility matrix of the core filestore driv
 | v1.3.0 (GA)                             |  yes |  yes  |
 | v1.3.1 (GA)                             |  yes |  yes  |
 | v1.3.2 (GA)                             |  yes |  yes  |
-| v1.3.3 (GA)                             |  yes |  yes  |
+| v1.3.4 (GA)                             |  yes |  yes  |
 | v1.3.5 (GA)                             |  yes |  yes  |
-| v1.3.7 (GA)                             |  yes |  yes  |
-| v1.3.8 (GA)                             |  yes |  yes  |
 | v1.3.9 (GA)                             |  yes |  yes  |
+| v1.3.10 (GA)                            |  yes |  yes  |
+| v1.3.11 (GA)                            |  yes |  yes  |
+| v1.3.12 (GA)                            |  yes |  yes  |
+| v1.4.1 (GA)                             |  yes |  yes  |
+| v1.4.2 (GA)                             |  yes |  yes  |
+| v1.4.3 (GA)                             |  yes |  yes  |
 | master                                  |  yes |  yes  |
 
 The manifest bundle which captures all the driver components (driver pod which includes the containers csi-external-provisioner, csi-external-resizer, csi-external-snapshotter, gcp-filestore-driver, csi-driver-registrar, csi driver object, rbacs, pod security policies etc) can be picked up from the master branch [overlays](deploy/kubernetes/overlays) directory. We structure the overlays directory per minor version of kubernetes because not all driver components can be used with all kubernetes versions. For example volume snapshots are supported 1.17+ kubernetes versions thus [stable-1-16](deploy/kubernetes/overlays/stable-1-16) driver manifests does not contain the snapshotter sidecar. Read more about overlays [here](docs/release/overlays.md).
@@ -70,10 +74,10 @@ volume. Customizable parameters for volume creation include:
 | Parameter         | Values                  | Default                                | Description |
 | ---------------   | ----------------------- |-----------                             | ----------- |
 | tier              | "standard"<br>"premium"<br>"enterprise" | "standard"             | storage performance tier |
-| network           | string                  | "default"                              | VPC name<br>When using "PRIVATE_SERVICE_ACCESS" connect-mode, network needs to be the full VPC name |
-| reserved-ipv4-cidr| string		              | ""                                     | CIDR range to allocate Filestore IP Ranges from.<br>The CIDR must be large enough to accommodate multiple Filestore IP Ranges of /29 each, /24 if enterprise tier is used |
-| reserved-ip-range | string		              | ""                                     | IP range to allocate Filestore IP Ranges from.<br>This flag is used instead of "reserved-ipv4-cidr" when "connect-mode" is set to "PRIVATE_SERVICE_ACCESS" and the value must be an [allocated IP address range](https://cloud.google.com/compute/docs/ip-addresses/reserve-static-internal-ip-address).<br>The IP range must be large enough to accommodate multiple Filestore IP Ranges of /29 each, /24 if enterprise tier is used |
-| connect-mode      | "DIRECT_PEERING"<br>"PRIVATE_SERVICE_ACCESS" | "DIRECT_PEERING"  | The network connect mode of the Filestore instance.<br>To provision Filestore instance with shared-vpc from service project, PRIVATE_SERVICE_ACCESS mode must be used |
+| network           | string                  | "default"                              | VPC name.<br>When using "PRIVATE_SERVICE_ACCESS" connect-mode, network needs to be the full VPC name. |
+| reserved-ipv4-cidr| string		              | ""                                     | CIDR range to allocate Filestore IP Ranges from.<br>The CIDR must be large enough to accommodate multiple Filestore IP Ranges of /29 each, /26 if enterprise tier is used. |
+| reserved-ip-range | string		              | ""                                     | IP range to allocate Filestore IP Ranges from.<br>This flag is used instead of "reserved-ipv4-cidr" when "connect-mode" is set to "PRIVATE_SERVICE_ACCESS" and the value must be an [allocated IP address range](https://cloud.google.com/compute/docs/ip-addresses/reserve-static-internal-ip-address).<br>The IP range must be large enough to accommodate multiple Filestore IP Ranges of /29 each, /26 if enterprise tier is used. |
+| connect-mode      | "DIRECT_PEERING"<br>"PRIVATE_SERVICE_ACCESS" | "DIRECT_PEERING"  | The network connect mode of the Filestore instance.<br>To provision Filestore instance with shared-vpc from service project, PRIVATE_SERVICE_ACCESS mode must be used. |
 | instance-encryption-kms-key | string        | ""                                     | Fully qualified resource identifier for the key to use to encrypt new instances. |
 
 For Kubernetes clusters, these parameters are specified in the StorageClass.

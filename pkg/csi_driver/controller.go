@@ -33,14 +33,25 @@ import (
 )
 
 const (
-	// premium tier min is 2.5 Tb, let GCFS error
-	minVolumeSize     int64 = 1 * util.Tb
-	modeInstance            = "modeInstance"
-	newInstanceVolume       = "vol1"
+	modeInstance      = "modeInstance"
+	newInstanceVolume = "vol1"
 
 	defaultTier    = "standard"
 	enterpriseTier = "enterprise"
+	premiumTier    = "premium"
+	basicHDDTier   = "basic_hdd"
+	basicSSDTier   = "basic_ssd"
+	highScaleTier  = "high_scale_ssd"
 	defaultNetwork = "default"
+
+	defaultTierMinSize    = 1 * util.Tb
+	defaultTierMaxSize    = 639 * util.Tb / 10
+	enterpriseTierMinSize = 1 * util.Tb
+	enterpriseTierMaxSize = 10 * util.Tb
+	highScaleTierMinSize  = 10 * util.Tb
+	highScaleTierMaxSize  = 100 * util.Tb
+	premiumTierMinSize    = 25 * util.Tb / 10
+	premiumTierMaxSize    = 639 * util.Tb / 10
 
 	directPeering        = "DIRECT_PEERING"
 	privateServiceAccess = "PRIVATE_SERVICE_ACCESS"
@@ -51,8 +62,9 @@ const (
 
 // Volume attributes
 const (
-	attrIP     = "ip"
-	attrVolume = "volume"
+	attrIP                 = "ip"
+	attrVolume             = "volume"
+	attrSupportLockRelease = "supportLockRelease"
 )
 
 // CreateVolume parameters
@@ -60,12 +72,13 @@ const (
 	paramTier                      = "tier"
 	paramLocation                  = "location"
 	paramNetwork                   = "network"
-	paramReservedIPV4CIDR          = "reserved-ipv4-cidr"
-	paramReservedIPRange           = "reserved-ip-range"
-	paramConnectMode               = "connect-mode"
+	ParamReservedIPV4CIDR          = "reserved-ipv4-cidr"
+	ParamReservedIPRange           = "reserved-ip-range"
+	ParamConnectMode               = "connect-mode"
 	paramMultishare                = "multishare"
-	paramInstanceEncryptionKmsKey  = "instance-encryption-kms-key"
-	paramMultishareInstanceScLabel = "instance-storageclass-label"
+	ParamInstanceEncryptionKmsKey  = "instance-encryption-kms-key"
+	ParamMultishareInstanceScLabel = "instance-storageclass-label"
+	paramMaxVolumeSize             = "max-volume-size"
 
 	// Keys for PV and PVC parameters as reported by external-provisioner
 	ParameterKeyPVCName      = "csi.storage.k8s.io/pvc/name"
@@ -80,9 +93,14 @@ const (
 	tagKeyCreatedForClaimName      = "kubernetes_io_created-for_pvc_name"
 	tagKeyCreatedForVolumeName     = "kubernetes_io_created-for_pv_name"
 	tagKeyCreatedBy                = "storage_gke_io_created-by"
-	tagKeyClusterName              = "storage_gke_io_cluster_name"
-	tagKeyClusterLocation          = "storage_gke_io_cluster_location"
+	TagKeyClusterName              = "storage_gke_io_cluster_name"
+	TagKeyClusterLocation          = "storage_gke_io_cluster_location"
 )
+
+type capacityRangeForTier struct {
+	min int64
+	max int64
+}
 
 // controllerServer handles volume provisioning
 type controllerServer struct {
@@ -96,11 +114,14 @@ type controllerServerConfig struct {
 	ipAllocator          *util.IPAllocator
 	volumeLocks          *util.VolumeLocks
 	enableMultishare     bool
+	statefulController   *MultishareStatefulController
 	multiShareController *MultishareController
+	reconciler           *MultishareReconciler
 	metricsManager       *metrics.MetricsManager
 	ecfsDescription      string
 	isRegional           bool
 	clusterName          string
+	features             *GCFSDriverFeatureOptions
 }
 
 func newControllerServer(config *controllerServerConfig) csi.ControllerServer {
@@ -109,8 +130,24 @@ func newControllerServer(config *controllerServerConfig) csi.ControllerServer {
 	if config.enableMultishare {
 		config.multiShareController = NewMultishareController(config)
 		config.multiShareController.opsManager.controllerServer = cs
+		if config.features.FeatureStateful.Enabled {
+			config.statefulController = NewMultishareStatefulController(config)
+			config.statefulController.mc = config.multiShareController
+		}
+	}
+	if config.reconciler != nil {
+		klog.Infof("stateful reconciler enabled, setting its controller server")
+		config.reconciler.controllerServer = cs
 	}
 	return cs
+}
+
+func (m *controllerServer) Run(stopCh <-chan struct{}) {
+	if m.config.multiShareController == nil {
+		return
+	}
+
+	m.config.multiShareController.Run(stopCh)
 }
 
 // CreateVolume creates a GCFS instance
@@ -120,7 +157,13 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 			return nil, status.Error(codes.InvalidArgument, "multishare controller not enabled")
 		}
 		start := time.Now()
-		response, err := s.config.multiShareController.CreateVolume(ctx, req)
+		var response *csi.CreateVolumeResponse
+		var err error
+		if s.config.features.FeatureStateful.Enabled {
+			response, err = s.config.statefulController.CreateVolume(ctx, req)
+		} else {
+			response, err = s.config.multiShareController.CreateVolume(ctx, req)
+		}
 		duration := time.Since(start)
 		s.config.metricsManager.RecordOperationMetrics(err, methodCreateVolume, modeMultishare, duration)
 		klog.Infof("CreateVolume response %+v error %v, for request %+v", response, err, req)
@@ -137,7 +180,8 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	capBytes, err := getRequestCapacity(req.GetCapacityRange())
+	tier := getTierFromParams(req.GetParameters())
+	capBytes, err := getRequestCapacity(req.GetCapacityRange(), tier)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -156,9 +200,6 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 
 	sourceSnapshotId := ""
 	if req.GetVolumeContentSource() != nil {
-		if newFiler.Tier == enterpriseTier {
-			return nil, status.Error(codes.InvalidArgument, "Enterprise tier Filestore does not support Backup yet")
-		}
 		if req.GetVolumeContentSource().GetVolume() != nil {
 			return nil, status.Error(codes.InvalidArgument, "Unsupported volume content source")
 		}
@@ -213,13 +254,13 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		// If we are creating a new instance, we need pick an unused CIDR range from reserved-ipv4-cidr
 		// If the param was not provided, we default reservedIPRange to "" and cloud provider takes care of the allocation
 		if newFiler.Network.ConnectMode == privateServiceAccess {
-			if reservedIPRange, ok := param[paramReservedIPRange]; ok {
+			if reservedIPRange, ok := param[ParamReservedIPRange]; ok {
 				if IsCIDR(reservedIPRange) {
 					return nil, status.Errorf(codes.InvalidArgument, "When using connect mode PRIVATE_SERVICE_ACCESS, if reserved IP range is specified, it must be a named address range instead of direct CIDR value %v", reservedIPRange)
 				}
 				newFiler.Network.ReservedIpRange = reservedIPRange
 			}
-		} else if reservedIPV4CIDR, ok := param[paramReservedIPV4CIDR]; ok {
+		} else if reservedIPV4CIDR, ok := param[ParamReservedIPV4CIDR]; ok {
 			reservedIPRange, err := s.reserveIPRange(ctx, newFiler, reservedIPV4CIDR)
 
 			// Possible cases are 1) CreateInstanceAborted, 2)CreateInstance running in background
@@ -250,13 +291,13 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		}
 		if createErr != nil {
 			klog.Errorf("Create volume for volume Id %s failed: %v", volumeID, createErr.Error())
-			if errCode := file.IsUserError(err); errCode != nil {
-				return nil, status.Error(*errCode, err.Error())
+			if errCode := file.IsUserError(createErr); errCode != nil {
+				return nil, status.Error(*errCode, createErr.Error())
 			}
 			return nil, status.Error(codes.Internal, createErr.Error())
 		}
 	}
-	resp := &csi.CreateVolumeResponse{Volume: fileInstanceToCSIVolume(filer, modeInstance, sourceSnapshotId)}
+	resp := &csi.CreateVolumeResponse{Volume: s.fileInstanceToCSIVolume(filer, modeInstance, sourceSnapshotId)}
 	klog.Infof("CreateVolume succeeded: %+v", resp)
 	return resp, nil
 }
@@ -322,7 +363,13 @@ func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 			return nil, status.Error(codes.InvalidArgument, "multishare controller not enabled")
 		}
 		start := time.Now()
-		response, err := s.config.multiShareController.DeleteVolume(ctx, req)
+		var response *csi.DeleteVolumeResponse
+		var err error
+		if s.config.features.FeatureStateful.Enabled {
+			response, err = s.config.statefulController.DeleteVolume(ctx, req)
+		} else {
+			response, err = s.config.multiShareController.DeleteVolume(ctx, req)
+		}
 		duration := time.Since(start)
 		s.config.metricsManager.RecordOperationMetrics(err, methodDeleteVolume, modeMultishare, duration)
 		klog.Infof("Deletevolume response %+v error %v, for request: %+v", response, err, req)
@@ -346,6 +393,9 @@ func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 	if err != nil {
 		if file.IsNotFoundErr(err) {
 			return &csi.DeleteVolumeResponse{}, nil
+		}
+		if errCode := file.IsUserError(err); errCode != nil {
+			return nil, status.Error(*errCode, err.Error())
 		}
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -416,36 +466,98 @@ func (s *controllerServer) ControllerGetCapabilities(ctx context.Context, req *c
 	}, nil
 }
 
-// getRequestCapacity returns the volume size that should be provisioned
-func getRequestCapacity(capRange *csi.CapacityRange) (int64, error) {
-	if capRange == nil {
-		return minVolumeSize, nil
+// getTierFromParams returns the provided tier or default
+func getTierFromParams(params map[string]string) string {
+	if val, ok := params[paramTier]; ok {
+		return val
 	}
 
-	rCap := capRange.GetRequiredBytes()
-	rSet := rCap > 0
-	lCap := capRange.GetLimitBytes()
-	lSet := lCap > 0
+	return defaultTier
+}
 
-	if lSet && rSet && lCap < rCap {
-		return 0, fmt.Errorf("limit bytes %v is less than required bytes %v", lCap, rCap)
+// validator function to check for invalid capacity size requests
+func invalidCapacityRange(capRange *csi.CapacityRange, tier string) error {
+	validRange := provisionableCapacityForTier(tier)
+
+	requiredCap := capRange.GetRequiredBytes()
+	requireSet := requiredCap > 0
+	limitCap := capRange.GetLimitBytes()
+	limitSet := limitCap > 0
+
+	if limitSet && requireSet && limitCap < requiredCap {
+		return fmt.Errorf("limit bytes %vTiB is less than required bytes %vTiB", float64(limitCap)/util.Tb, float64(requiredCap)/util.Tb)
 	}
 
-	if lSet && lCap < minVolumeSize {
-		return 0, fmt.Errorf("limit bytes %v is less than minimum instance size bytes %v", lCap, minVolumeSize)
-	}
-
-	if lSet {
-		if rCap == 0 {
-			// request not set
-			return lCap, nil
+	if requireSet {
+		if requiredCap > validRange.max {
+			return fmt.Errorf("request bytes %vTiB is more than maximum instance size bytes %vTiB for tier %s", float64(requiredCap)/util.Tb, float64(validRange.max)/util.Tb, tier)
 		}
-		// request set, round up to min
-		return util.Max(rCap, minVolumeSize), nil
+
+		if !limitSet && requiredCap < validRange.min {
+			// Avoid surprising users by provisioning more than Requested
+			klog.Warningf("required bytes %vTiB is less than minimum instance size capacity %vTiB for tier %s, but no upper bound was specified. Rounding up capacity request to %vTiB for tier %s.", float64(requiredCap)/util.Tb, float64(validRange.min)/util.Tb, tier, float64(validRange.min)/util.Tb, tier)
+		}
+	}
+	if limitSet {
+		if limitCap < validRange.min {
+			return fmt.Errorf("limit bytes %vTiB is less than minimum instance size bytes %vTiB for tier %s", float64(limitCap)/util.Tb, float64(validRange.min)/util.Tb, tier)
+
+		}
+		if !requireSet && limitCap > validRange.max {
+			// Avoid surprising users by provisioning less than Requested
+			klog.Warningf("required bytes %vTiB is greater than maximum instance size capacity %vTiB for tier %s, but no lower bound was specified. Rounding down capacity request to %vTiB for tier %s", float64(limitCap)/util.Tb, float64(validRange.max)/util.Tb, tier, float64(validRange.max)/util.Tb, tier)
+		}
 	}
 
-	// limit not set
-	return util.Max(rCap, minVolumeSize), nil
+	return nil
+}
+
+// init function to get min and max volume sizes per tier
+func provisionableCapacityForTier(tier string) capacityRangeForTier {
+	defaultRange := capacityRangeForTier{min: defaultTierMinSize, max: defaultTierMaxSize}
+	enterpriseRange := capacityRangeForTier{min: enterpriseTierMinSize, max: enterpriseTierMaxSize}
+	highScaleRange := capacityRangeForTier{min: highScaleTierMinSize, max: highScaleTierMaxSize}
+	premiumRange := capacityRangeForTier{min: premiumTierMinSize, max: premiumTierMaxSize}
+	provisionableCapacityForTier := map[string]capacityRangeForTier{
+		defaultTier:    defaultRange,
+		enterpriseTier: enterpriseRange,
+		highScaleTier:  highScaleRange,
+		premiumTier:    premiumRange,
+		basicSSDTier:   premiumRange, //these two are aliases
+		basicHDDTier:   defaultRange, //these two are aliases
+	}
+
+	validRange, ok := provisionableCapacityForTier[tier]
+	if !ok {
+		validRange = provisionableCapacityForTier[defaultTier]
+	}
+	return validRange
+}
+
+// getRequestCapacity returns the volume size that should be provisioned
+func getRequestCapacity(capRange *csi.CapacityRange, tier string) (int64, error) {
+	validRange := provisionableCapacityForTier(tier)
+
+	if capRange == nil {
+		return validRange.min, nil
+	}
+
+	if err := invalidCapacityRange(capRange, tier); err != nil {
+		return 0, err
+	}
+
+	requiredCap := capRange.GetRequiredBytes()
+	requireSet := requiredCap > 0
+	maxRequired := capRange.GetLimitBytes()
+	limitSet := maxRequired > 0
+
+	if requireSet {
+		return util.Max(requiredCap, validRange.min), nil
+	} else if limitSet {
+		return util.Min(maxRequired, validRange.max), nil
+	} else {
+		return validRange.min, nil
+	}
 }
 
 // generateNewFileInstance populates the GCFS Instance object using
@@ -477,17 +589,17 @@ func (s *controllerServer) generateNewFileInstance(name string, capBytes int64, 
 			}
 		case paramNetwork:
 			network = v
-		case paramConnectMode:
+		case ParamConnectMode:
 			connectMode = v
 			if connectMode != directPeering && connectMode != privateServiceAccess {
 				return nil, fmt.Errorf("connect mode can only be one of %q or %q", directPeering, privateServiceAccess)
 			}
-		case paramInstanceEncryptionKmsKey:
+		case ParamInstanceEncryptionKmsKey:
 			kmsKeyName = v
 		// Ignore the cidr flag as it is not passed to the cloud provider
 		// It will be used to get unreserved IP in the reserveIPV4Range function
 		// ignore IPRange flag as it will be handled at the same place as cidr
-		case paramReservedIPV4CIDR, paramReservedIPRange:
+		case ParamReservedIPV4CIDR, ParamReservedIPRange:
 			continue
 		case ParameterKeyLabels, ParameterKeyPVCName, ParameterKeyPVCNamespace, ParameterKeyPVName:
 		case "csiprovisionersecretname", "csiprovisionersecretnamespace":
@@ -516,7 +628,7 @@ func (s *controllerServer) generateNewFileInstance(name string, capBytes int64, 
 }
 
 // fileInstanceToCSIVolume generates a CSI volume spec from the cloud Instance
-func fileInstanceToCSIVolume(instance *file.ServiceInstance, mode, sourceSnapshotId string) *csi.Volume {
+func (s *controllerServer) fileInstanceToCSIVolume(instance *file.ServiceInstance, mode, sourceSnapshotId string) *csi.Volume {
 	resp := &csi.Volume{
 		VolumeId:      getVolumeIDFromFileInstance(instance, mode),
 		CapacityBytes: instance.Volume.SizeBytes,
@@ -535,6 +647,9 @@ func fileInstanceToCSIVolume(instance *file.ServiceInstance, mode, sourceSnapsho
 		}
 		resp.ContentSource = contentSource
 	}
+	if s.config.features.FeatureLockRelease.Enabled && strings.ToLower(instance.Tier) == enterpriseTier {
+		resp.VolumeContext[attrSupportLockRelease] = "true"
+	}
 	return resp
 }
 
@@ -551,16 +666,17 @@ func (s *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 			return nil, status.Error(codes.InvalidArgument, "multishare controller not enabled")
 		}
 		start := time.Now()
-		response, err := s.config.multiShareController.ControllerExpandVolume(ctx, req)
+		var response *csi.ControllerExpandVolumeResponse
+		var err error
+		if s.config.features.FeatureStateful.Enabled {
+			response, err = s.config.statefulController.ControllerExpandVolume(ctx, req)
+		} else {
+			response, err = s.config.multiShareController.ControllerExpandVolume(ctx, req)
+		}
 		duration := time.Since(start)
 		s.config.metricsManager.RecordOperationMetrics(err, methodExpandVolume, modeMultishare, duration)
 		klog.Infof("ControllerExpandVolume response %+v error %v, for request: %+v", response, err, req)
 		return response, err
-	}
-
-	reqBytes, err := getRequestCapacity(req.GetCapacityRange())
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	if acquired := s.config.volumeLocks.TryAcquire(volumeID); !acquired {
@@ -569,6 +685,11 @@ func (s *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 	defer s.config.volumeLocks.Release(volumeID)
 
 	filer, _, err := getFileInstanceFromID(volumeID)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	reqBytes, err := getRequestCapacity(req.GetCapacityRange(), filer.Tier)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -765,7 +886,7 @@ func (s *controllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSn
 	}
 
 	// Check for existing snapshot
-	backupUri, _, err := file.CreateBackpURI(filer, req.Name, util.GetBackupLocation(req.GetParameters()))
+	backupUri, _, err := file.CreateBackupURI(filer, req.Name, util.GetBackupLocation(req.GetParameters()))
 	if err != nil {
 		return nil, err
 	}
@@ -775,12 +896,12 @@ func (s *controllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSn
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 	} else {
-		backupSourceCSIHandle, err := util.BackupVolumeSourceToCSIVolumeHandle(backupInfo.SourceVolumeHandle)
+		backupSourceCSIHandle, err := util.BackupVolumeSourceToCSIVolumeHandle(backupInfo.SourceInstance, backupInfo.SourceShare)
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "Cannot determine volume handle from back source %s", backupInfo.SourceVolumeHandle)
+			return nil, status.Errorf(codes.Internal, "Cannot determine volume handle from back source instance %s, share %s", backupInfo.SourceInstance, backupInfo.SourceShare)
 		}
 		if backupSourceCSIHandle != volumeID {
-			return nil, status.Errorf(codes.AlreadyExists, "Backup already exists with a different source volume %s, input source volume %s", backupInfo.SourceVolumeHandle, volumeID)
+			return nil, status.Errorf(codes.AlreadyExists, "Backup already exists with a different source volume %s, input source volume %s", backupSourceCSIHandle, volumeID)
 		}
 		// Check if backup is in the process of getting created.
 		if backupInfo.Backup.State == "CREATING" || backupInfo.Backup.State == "FINALIZING" {

@@ -157,30 +157,33 @@ func (manager *fakeServiceManager) ResizeInstance(ctx context.Context, obj *Serv
 }
 
 func (manager *fakeServiceManager) CreateBackup(ctx context.Context, obj *ServiceInstance, backupName string, backupLocation string) (*filev1beta1.Backup, error) {
-	backupUri, _, err := CreateBackpURI(obj, backupName, backupLocation)
+	backupUri, _, err := CreateBackupURI(obj, backupName, backupLocation)
 	if err != nil {
 		return nil, err
 	}
 
 	backupSource := fmt.Sprintf("projects/%s/locations/%s/instances/%s", obj.Project, obj.Location, obj.Name)
 	if backupInfo, ok := manager.backups[backupUri]; ok {
-		if backupInfo.SourceVolumeHandle != backupSource {
-			return nil, fmt.Errorf("Mismatch in source volume handle for existing snapshot")
+		if backupInfo.SourceInstance != backupSource && backupInfo.SourceShare != obj.Volume.Name {
+			// TODO: format the right info
+			return nil, fmt.Errorf("Mismatch in source for existing snapshot %v", backupInfo)
 		}
 		return backupInfo.Backup, nil
 	}
 
 	backupToCreate := &filev1beta1.Backup{
-		Name:            backupUri,
-		SourceFileShare: obj.Volume.Name,
-		SourceInstance:  backupSource,
-		CreateTime:      "2020-10-02T15:01:23Z",
-		State:           "READY",
-		CapacityGb:      defaultCapacityGb,
+		Name:               backupUri,
+		SourceFileShare:    obj.Volume.Name,
+		SourceInstance:     backupSource,
+		SourceInstanceTier: obj.Tier,
+		CreateTime:         "2020-10-02T15:01:23Z",
+		State:              "READY",
+		CapacityGb:         defaultCapacityGb,
 	}
 	manager.backups[backupUri] = &BackupInfo{
-		Backup:             backupToCreate,
-		SourceVolumeHandle: backupSource,
+		Backup:         backupToCreate,
+		SourceInstance: backupSource,
+		SourceShare:    obj.Volume.Name,
 	}
 	return backupToCreate, nil
 }

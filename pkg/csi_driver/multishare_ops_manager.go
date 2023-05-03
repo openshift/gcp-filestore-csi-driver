@@ -50,14 +50,16 @@ type Workflow struct {
 
 // MultishareOpsManager manages the lifecycle of all instance and share operations.
 type MultishareOpsManager struct {
-	sync.Mutex       // Lock to perform thread safe multishare operations.
-	cloud            *cloud.Cloud
-	controllerServer *controllerServer
+	sync.Mutex         // Lock to perform thread safe multishare operations.
+	cloud              *cloud.Cloud
+	controllerServer   *controllerServer
+	msControllerServer *MultishareController
 }
 
-func NewMultishareOpsManager(cloud *cloud.Cloud) *MultishareOpsManager {
+func NewMultishareOpsManager(cloud *cloud.Cloud, mcs *MultishareController) *MultishareOpsManager {
 	return &MultishareOpsManager{
-		cloud: cloud,
+		cloud:              cloud,
+		msControllerServer: mcs,
 	}
 }
 
@@ -99,7 +101,7 @@ func (m *MultishareOpsManager) setupEligibleInstanceAndStartWorkflow(ctx context
 	}
 
 	// No share or running share create op found. Proceed to eligible instance check.
-	eligible, numIneligible, err := m.runEligibleInstanceCheck(ctx, req, ops, instance, regions)
+	eligible, err := m.runEligibleInstanceCheck(ctx, req, ops, instance, regions)
 	if err != nil {
 		return nil, nil, status.Error(codes.Aborted, err.Error())
 	}
@@ -128,22 +130,17 @@ func (m *MultishareOpsManager) setupEligibleInstanceAndStartWorkflow(ctx context
 		return w, nil, err
 	}
 
-	if numIneligible > 0 {
-		// some instances not ready yet. wait for more instances to be ready.
-		return nil, nil, status.Errorf(codes.Aborted, " %d non-ready instances detected. No ready instance found", numIneligible)
-	}
-
 	param := req.GetParameters()
 	// If we are creating a new instance, we need pick an unused CIDR range from reserved-ipv4-cidr
 	// If the param was not provided, we default reservedIPRange to "" and cloud provider takes care of the allocation
 	if instance.Network.ConnectMode == privateServiceAccess {
-		if reservedIPRange, ok := param[paramReservedIPRange]; ok {
+		if reservedIPRange, ok := param[ParamReservedIPRange]; ok {
 			if IsCIDR(reservedIPRange) {
 				return nil, nil, status.Error(codes.InvalidArgument, "When using connect mode PRIVATE_SERVICE_ACCESS, if reserved IP range is specified, it must be a named address range instead of direct CIDR value")
 			}
 			instance.Network.ReservedIpRange = reservedIPRange
 		}
-	} else if reservedIPV4CIDR, ok := param[paramReservedIPV4CIDR]; ok {
+	} else if reservedIPV4CIDR, ok := param[ParamReservedIPV4CIDR]; ok {
 		reservedIPRange, err := m.controllerServer.reserveIPRange(ctx, &file.ServiceInstance{
 			Project:  instance.Project,
 			Name:     instance.Name,
@@ -344,11 +341,11 @@ func (m *MultishareOpsManager) verifyNoRunningInstanceOrShareOpsForInstance(inst
 }
 
 // runEligibleInstanceCheck returns a list of ready and non-ready instances.
-func (m *MultishareOpsManager) runEligibleInstanceCheck(ctx context.Context, req *csi.CreateVolumeRequest, ops []*OpInfo, target *file.MultishareInstance, regions []string) ([]*file.MultishareInstance, int, error) {
+func (m *MultishareOpsManager) runEligibleInstanceCheck(ctx context.Context, req *csi.CreateVolumeRequest, ops []*OpInfo, target *file.MultishareInstance, regions []string) ([]*file.MultishareInstance, error) {
 	klog.Infof("ListMultishareInstances call initiated for request %+v.", req)
 	instances, err := m.listMatchedInstances(ctx, req, target, regions)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	klog.Infof("ListMultishareInstances call returned successfully with %d instances for request %+v.", len(instances), req)
 	// An instance is considered as eligible if and only if the state is 'READY', and there's no ops running against it.
@@ -356,13 +353,13 @@ func (m *MultishareOpsManager) runEligibleInstanceCheck(ctx context.Context, req
 	// An instance is considered as non-ready if any of the following conditions are met:
 	// 1. The instance state is "CREATING" or "REPAIRING".
 	// 2. The instance state is 'READY', but running ops are found on it.
-	nonReadyInstanceCount := 0
+	var nonReadyEligibleInstances []*file.MultishareInstance
 
 	for _, instance := range instances {
-		klog.Infof("Found multishare instance %s/%s/%s with state %s.", instance.Project, instance.Location, instance.Name, instance.State)
+		klog.Infof("Found multishare instance %s/%s/%s with state %s and max share count %d", instance.Project, instance.Location, instance.Name, instance.State, instance.MaxShareCount)
 		if instance.State == "CREATING" || instance.State == "REPAIRING" {
 			klog.Infof("Instance %s/%s/%s with state %s is not ready", instance.Project, instance.Location, instance.Name, instance.State)
-			nonReadyInstanceCount += 1
+			nonReadyEligibleInstances = append(nonReadyEligibleInstances, instance)
 			continue
 		}
 		if instance.State != "READY" {
@@ -374,16 +371,23 @@ func (m *MultishareOpsManager) runEligibleInstanceCheck(ctx context.Context, req
 		op, err := containsOpWithInstanceTargetPrefix(instance, ops)
 		if err != nil {
 			klog.Errorf("failed to check eligibility of instance %s", instance.Name)
-			return nil, 0, err
+			return nil, err
 		}
 
 		if op == nil {
 			shares, err := m.cloud.File.ListShares(ctx, &file.ListFilter{Project: instance.Project, Location: instance.Location, InstanceName: instance.Name})
 			if err != nil {
 				klog.Errorf("Failed to list shares of instance %s/%s/%s, err:%v", instance.Project, instance.Location, instance.Name, err.Error())
-				return nil, 0, err
+				return nil, err
 			}
-			if len(shares) >= util.MaxSharesPerInstance {
+
+			// If we encounter a scenario where the configurable shares per Filestore instance feature is disabled, CSI driver will continue to place max 10 shares per instance, irrespective of the actual max shares the Filestore instance can support.
+			// Alternately, if CSI max share features is enabled, but filestore disables the feature, the create volume may continue to fail beyond 10 shares per instance.
+			maxShareCount := util.MaxSharesPerInstance
+			if m.msControllerServer != nil && m.msControllerServer.featureMaxSharePerInstance {
+				maxShareCount = instance.MaxShareCount
+			}
+			if len(shares) >= maxShareCount {
 				continue
 			}
 
@@ -393,11 +397,32 @@ func (m *MultishareOpsManager) runEligibleInstanceCheck(ctx context.Context, req
 		}
 
 		klog.Infof("Instance %s/%s/%s with state %s is not ready with ongoing operation %s type %s", instance.Project, instance.Location, instance.Name, instance.State, op.Id, op.Type.String())
-		nonReadyInstanceCount += 1
+		nonReadyEligibleInstances = append(nonReadyEligibleInstances, instance)
+
 		// TODO: If we see > 1 instances with 0 shares (these could be possibly leaked instances where the driver hit timeout during creation op was in progress), should we trigger delete op for such instances? Possibly yes. Given that instance create/delete and share create/delete is serialized, maybe yes.
 	}
 
-	return readyEligibleInstances, nonReadyInstanceCount, nil
+	if len(readyEligibleInstances) == 0 && len(nonReadyEligibleInstances) > 0 {
+		errorString := "All eligible filestore instances are busy.\n"
+
+		for _, instance := range nonReadyEligibleInstances {
+			op, err := containsOpWithInstanceTargetPrefix(instance, ops) // Error for this call is already checked above
+			if err != nil {
+				klog.Errorf("failed to check eligibility of instance %s", instance.Name)
+				return nil, err
+			}
+			if op != nil {
+				errorString = fmt.Sprintf("%s Instance %s busy with operation type %s\n", errorString, instance.Name, op.Type)
+			} else {
+				errorString = fmt.Sprintf("%s Instance %s is in state %s\n", errorString, instance.Name, instance.State)
+			}
+		}
+
+		return nil, status.Errorf(codes.Aborted, errorString)
+
+	}
+
+	return readyEligibleInstances, nil
 }
 
 func (m *MultishareOpsManager) instanceNeedsExpand(ctx context.Context, share *file.Share, capacityNeeded int64) (bool, int64, error) {
@@ -696,7 +721,7 @@ func (m *MultishareOpsManager) listMatchedInstances(ctx context.Context, req *cs
 //  10. Both source and target instance should have a label with key
 //     "gke_cluster_name", and the value should be the same.
 func isMatchedInstance(source, target *file.MultishareInstance, req *csi.CreateVolumeRequest) (bool, error) {
-	matchLabels := [3]string{util.ParamMultishareInstanceScLabelKey, tagKeyClusterLocation, tagKeyClusterName}
+	matchLabels := [3]string{util.ParamMultishareInstanceScLabelKey, TagKeyClusterLocation, TagKeyClusterName}
 	for _, labelKey := range matchLabels {
 		if _, ok := target.Labels[labelKey]; !ok {
 			return false, fmt.Errorf("label %q missing in target instance %+v", labelKey, target)
@@ -706,7 +731,7 @@ func isMatchedInstance(source, target *file.MultishareInstance, req *csi.CreateV
 		}
 	}
 	params := req.GetParameters()
-	if instanceCIDR, ok := params[paramReservedIPV4CIDR]; ok {
+	if instanceCIDR, ok := params[ParamReservedIPV4CIDR]; ok {
 		withinRange, err := IsIpWithinRange(source.Network.Ip, instanceCIDR)
 		if err != nil {
 			return false, err

@@ -26,6 +26,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"sigs.k8s.io/gcp-filestore-csi-driver/pkg/apis/multishare/v1beta1"
 )
 
 const (
@@ -48,6 +51,8 @@ const (
 
 	// number of elements in backup Volume sources e.g. projects/{project name}/locations/{zone}/instances/{name}
 	volumeTotalElements = 6
+
+	ManagedFilestoreCSINamespace = "gke-managed-filestorecsi"
 )
 
 // Round up to the nearest Gb
@@ -198,12 +203,12 @@ func GetBackupLocation(params map[string]string) string {
 	return location
 }
 
-func BackupVolumeSourceToCSIVolumeHandle(backupVolumeSource string) (string, error) {
-	splitId := strings.Split(backupVolumeSource, "/")
+func BackupVolumeSourceToCSIVolumeHandle(sourceInstance, sourceShare string) (string, error) {
+	splitId := strings.Split(sourceInstance, "/")
 	if len(splitId) != volumeTotalElements {
-		return "", fmt.Errorf("Failed to get id components. Expected 'projects/{project}/location/{zone}/instances/{name}'. Got: %s", backupVolumeSource)
+		return "", fmt.Errorf("Failed to get id components. Expected 'projects/{project}/location/{zone}/instances/{name}'. Got: %s", sourceInstance)
 	}
-	return fmt.Sprintf("modeInstance/%s/%s/vol1", splitId[3], splitId[5]), nil
+	return fmt.Sprintf("modeInstance/%s/%s/%s", splitId[3], splitId[5], sourceShare), nil
 }
 
 // Multishare util functions.
@@ -225,7 +230,7 @@ func CheckLabelValueRegex(value string) error {
 }
 
 func ParseInstanceURI(instanceURI string) (string, string, string, error) {
-	// Expected instance URI projects/<project-name>/locations/<location-name>/instances/<instance-name>/shares/<share-name>
+	// Expected instance URI projects/<project-name>/locations/<location-name>/instances/<instance-name>
 	splitStr := strings.Split(instanceURI, "/")
 	if len(splitStr) != InstanceURISplitLen {
 		return "", "", "", fmt.Errorf("Unknown instance URI format %q", instanceURI)
@@ -262,8 +267,10 @@ func ParseShareURI(shareURI string) (string, string, string, string, error) {
 func GetMultishareOpsTimeoutConfig(opType OperationType) (time.Duration, time.Duration, error) {
 	switch opType {
 	case InstanceCreate, ShareDelete:
-		return 1 * time.Hour, 5 * time.Second, nil
-	case InstanceDelete, InstanceUpdate, ShareCreate, ShareUpdate:
+		return 1 * time.Hour, 60 * time.Second, nil
+	case InstanceDelete:
+		return 10 * time.Minute, 60 * time.Second, nil
+	case InstanceUpdate, ShareCreate, ShareUpdate:
 		return 10 * time.Minute, 5 * time.Second, nil
 	default:
 		return 0, 0, fmt.Errorf("unknown op type %v", opType)
@@ -283,4 +290,60 @@ func IsAligned(curSizeBytes int64, expectedBytes int64) bool {
 		return true
 	}
 	return false
+}
+
+func ErrCodePtr(code codes.Code) *codes.Code {
+	return &code
+}
+
+func ShareStateToCRDStatus(state string) (v1beta1.FilestoreStatus, error) {
+	switch state {
+	case "CREATING":
+		return v1beta1.CREATING, nil
+	case "READY":
+		return v1beta1.READY, nil
+	case "DELETING", "STATE_UNSPECIFIED":
+		return v1beta1.UPDATING, nil
+	default:
+		return "", fmt.Errorf("Unknown share state: %q", state)
+	}
+}
+
+func InstanceStateToCRDStatus(state string) (v1beta1.FilestoreStatus, error) {
+	switch state {
+	case "CREATING":
+		return v1beta1.CREATING, nil
+	case "READY":
+		return v1beta1.READY, nil
+	case "DELETING", "STATE_UNSPECIFIED", "REPAIRING", "ERROR", "RESTORING", "SUSPENDED", "REVERTING", "RESUMING":
+		return v1beta1.UPDATING, nil
+	default:
+		return "", fmt.Errorf("Unknown share state: %q", state)
+	}
+}
+
+// this function replaces "/" in instanceURI with "." to comply with custom resource naming rule
+func InstanceURIToInstanceInfoName(instanceURI string) string {
+	return strings.ReplaceAll(instanceURI, "/", ".")
+}
+
+// this function replaces "." in instanceInfo name string with "/" to reconstruct instanceURI
+func InstanceInfoNameToInstanceURI(iiName string) string {
+	return strings.ReplaceAll(iiName, ".", "/")
+}
+
+func ShareToShareInfoName(shareName string) string {
+	return strings.ReplaceAll(shareName, "_", "-")
+}
+
+func ShareInfoToShareName(siName string) string {
+	s := strings.ToLower(siName)
+	return strings.ReplaceAll(s, "-", "_")
+}
+
+func BuildConfig(kubeconfig string) (*rest.Config, error) {
+	if kubeconfig != "" {
+		return clientcmd.BuildConfigFromFlags("", kubeconfig)
+	}
+	return rest.InClusterConfig()
 }

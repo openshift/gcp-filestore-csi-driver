@@ -411,12 +411,15 @@ func TestInstanceNeedsExpand(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			opUnblocker := make(chan chan file.Signal, 1)
 			cloudProvider := initCloudProviderWithBlockingFileService(t, opUnblocker)
-			manager := NewMultishareOpsManager(cloudProvider)
-
+			config := &controllerServerConfig{
+				driver: initTestDriver(t),
+				cloud:  cloudProvider,
+			}
+			mcs := NewMultishareController(config)
 			runRequest := func(ctx context.Context, share *file.Share, capNeeded int64) <-chan Response {
 				responseChannel := make(chan Response)
 				go func() {
-					needsExpand, targetBytes, err := manager.instanceNeedsExpand(context.Background(), share, capNeeded)
+					needsExpand, targetBytes, err := mcs.opsManager.instanceNeedsExpand(context.Background(), share, capNeeded)
 					responseChannel <- Response{
 						instanceNeedsExpand: needsExpand,
 						targetBytes:         targetBytes,
@@ -428,9 +431,9 @@ func TestInstanceNeedsExpand(t *testing.T) {
 
 			for _, share := range tc.initShares {
 				if share.Parent != nil {
-					manager.cloud.File.StartCreateMultishareInstanceOp(context.Background(), share.Parent)
+					mcs.opsManager.cloud.File.StartCreateMultishareInstanceOp(context.Background(), share.Parent)
 				}
-				manager.cloud.File.StartCreateShareOp(context.Background(), &share)
+				mcs.opsManager.cloud.File.StartCreateShareOp(context.Background(), &share)
 			}
 
 			respChannel := runRequest(context.Background(), tc.targetShareToAccomodate, tc.targetShareToAccomodate.CapacityBytes)
@@ -473,7 +476,7 @@ func TestListMatchedInstances(t *testing.T) {
 			name: "empty init inistance list",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -482,8 +485,8 @@ func TestListMatchedInstances(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 		},
@@ -491,7 +494,7 @@ func TestListMatchedInstances(t *testing.T) {
 			name: "non-empty init inistance list",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -500,8 +503,8 @@ func TestListMatchedInstances(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstanceList: []*file.MultishareInstance{
@@ -511,8 +514,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 				},
 			},
@@ -523,8 +526,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 				},
 			},
@@ -533,7 +536,7 @@ func TestListMatchedInstances(t *testing.T) {
 			name: "non-empty init inistance list, 1 instance match",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix + "1",
+					ParamMultishareInstanceScLabel: testInstanceScPrefix + "1",
 				},
 			},
 			target: &file.MultishareInstance{
@@ -542,8 +545,8 @@ func TestListMatchedInstances(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix + "1",
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstanceList: []*file.MultishareInstance{
@@ -553,8 +556,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix + "1",
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 				},
 				{
@@ -563,8 +566,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix + "1",
-						tagKeyClusterLocation:                  testRegion,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testRegion,
+						TagKeyClusterName:                      testClusterName,
 					},
 				},
 				{
@@ -573,8 +576,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: "testprefix-3",
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 				},
 				{
@@ -583,8 +586,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix + "1",
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName + "-new",
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName + "-new",
 					},
 				},
 				{
@@ -593,8 +596,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix + "1",
-						tagKeyClusterLocation:                  testRegion,
-						tagKeyClusterName:                      testClusterName + "-new",
+						TagKeyClusterLocation:                  testRegion,
+						TagKeyClusterName:                      testClusterName + "-new",
 					},
 				},
 			},
@@ -605,8 +608,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix + "1",
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 				},
 			},
@@ -615,7 +618,7 @@ func TestListMatchedInstances(t *testing.T) {
 			name: "non-empty init inistance list, 2 instances match",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -624,8 +627,8 @@ func TestListMatchedInstances(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstanceList: []*file.MultishareInstance{
@@ -635,8 +638,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 				},
 				{
@@ -645,8 +648,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 				},
 				{
@@ -665,8 +668,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 				},
 				{
@@ -675,8 +678,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 				},
 			},
@@ -685,7 +688,7 @@ func TestListMatchedInstances(t *testing.T) {
 			name: "non-specified sc prefix in init instance list",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -694,8 +697,8 @@ func TestListMatchedInstances(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstanceList: []*file.MultishareInstance{
@@ -704,8 +707,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Project:  testProject,
 					Location: testRegion,
 					Labels: map[string]string{
-						tagKeyClusterLocation: testLocation,
-						tagKeyClusterName:     testClusterName,
+						TagKeyClusterLocation: testLocation,
+						TagKeyClusterName:     testClusterName,
 					},
 				},
 			},
@@ -714,8 +717,8 @@ func TestListMatchedInstances(t *testing.T) {
 			name: "1 ip address within, 1 out of reserved-ipv4-cidr",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
-					paramReservedIPV4CIDR:          "10.0.0.0/24",
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamReservedIPV4CIDR:          "10.0.0.0/24",
 				},
 			},
 			target: &file.MultishareInstance{
@@ -724,8 +727,8 @@ func TestListMatchedInstances(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 				Network: file.Network{
 					ReservedIpRange: "10.0.0.0/24",
@@ -738,8 +741,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					Network: file.Network{
 						ReservedIpRange: "10.0.0.0/21",
@@ -752,8 +755,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					Network: file.Network{
 						ReservedIpRange: "11.0.0.0/24",
@@ -768,8 +771,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					Network: file.Network{
 						ReservedIpRange: "10.0.0.0/24",
@@ -782,11 +785,11 @@ func TestListMatchedInstances(t *testing.T) {
 			name: "location, tier, network, connect-mode and cmek alignment test",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
-					paramReservedIPV4CIDR:          "10.0.0.0/24",
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamReservedIPV4CIDR:          "10.0.0.0/24",
 					paramTier:                      enterpriseTier,
 					paramNetwork:                   testVPCNetwork,
-					paramInstanceEncryptionKmsKey:  "projects/test-project/locations/us-central1/keyRings/test-cmek-key-ring/cryptoKeys/test-cmek-key",
+					ParamInstanceEncryptionKmsKey:  "projects/test-project/locations/us-central1/keyRings/test-cmek-key-ring/cryptoKeys/test-cmek-key",
 				},
 			},
 			target: &file.MultishareInstance{
@@ -795,8 +798,8 @@ func TestListMatchedInstances(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 				Network: file.Network{
 					ReservedIpRange: "10.0.0.0/24",
@@ -813,8 +816,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: "us-west1",
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					Network: file.Network{
 						ReservedIpRange: "10.0.0.0/24",
@@ -831,8 +834,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					Network: file.Network{
 						ReservedIpRange: "10.0.0.0/24",
@@ -849,8 +852,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					Network: file.Network{
 						ReservedIpRange: "10.0.0.0/24",
@@ -867,8 +870,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					Network: file.Network{
 						ReservedIpRange: "10.0.0.0/24",
@@ -885,8 +888,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					Network: file.Network{
 						ReservedIpRange: "10.0.0.0/24",
@@ -902,8 +905,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					Network: file.Network{
 						ReservedIpRange: "10.0.0.0/21",
@@ -922,8 +925,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					Network: file.Network{
 						ReservedIpRange: "10.0.0.0/21",
@@ -940,8 +943,8 @@ func TestListMatchedInstances(t *testing.T) {
 			name: "invalid reserved-ipv4-cidr",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
-					paramReservedIPV4CIDR:          "test-ip-range",
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamReservedIPV4CIDR:          "test-ip-range",
 				},
 			},
 			target: &file.MultishareInstance{
@@ -950,8 +953,8 @@ func TestListMatchedInstances(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstanceList: []*file.MultishareInstance{
@@ -961,8 +964,8 @@ func TestListMatchedInstances(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 				},
 			},
@@ -979,9 +982,12 @@ func TestListMatchedInstances(t *testing.T) {
 			for _, i := range tc.initInstanceList {
 				cloudProvider.File.StartCreateMultishareInstanceOp(context.Background(), i)
 			}
-
-			manager := NewMultishareOpsManager(cloudProvider)
-			filteredList, err := manager.listMatchedInstances(context.Background(), tc.req, tc.target, testRegions)
+			config := &controllerServerConfig{
+				driver: initTestDriver(t),
+				cloud:  cloudProvider,
+			}
+			mcs := NewMultishareController(config)
+			filteredList, err := mcs.opsManager.listMatchedInstances(context.Background(), tc.req, tc.target, testRegions)
 			if tc.expectError && err == nil {
 				t.Errorf("expected error: %v", err)
 			}
@@ -1268,8 +1274,13 @@ func TestListMultishareResourceRunningOps(t *testing.T) {
 			}
 			cloudProvider, _ := cloud.NewFakeCloud()
 			cloudProvider.File = s
-			manager := NewMultishareOpsManager(cloudProvider)
-			ops, err := manager.listMultishareResourceRunningOps(context.Background())
+			config := &controllerServerConfig{
+				driver:      initTestDriver(t),
+				fileService: s,
+				cloud:       cloudProvider,
+			}
+			mcs := NewMultishareController(config)
+			ops, err := mcs.opsManager.listMultishareResourceRunningOps(context.Background())
 			if err != nil {
 				t.Fatalf("failed to initialize GCFS service: %v", err)
 			}
@@ -1365,8 +1376,13 @@ func TestVerifyNoRunningInstanceOps(t *testing.T) {
 			}
 			cloudProvider, _ := cloud.NewFakeCloud()
 			cloudProvider.File = s
-			manager := NewMultishareOpsManager(cloudProvider)
-			err = manager.verifyNoRunningInstanceOps(tc.instance, tc.ops)
+			config := &controllerServerConfig{
+				driver:      initTestDriver(t),
+				fileService: s,
+				cloud:       cloudProvider,
+			}
+			mcs := NewMultishareController(config)
+			err = mcs.opsManager.verifyNoRunningInstanceOps(tc.instance, tc.ops)
 			if tc.errorExpected && err == nil {
 				t.Errorf("expected error, found none")
 			}
@@ -1465,8 +1481,13 @@ func TestVerifyNoRunningInstanceOrShareOpsForInstance(t *testing.T) {
 			}
 			cloudProvider, _ := cloud.NewFakeCloud()
 			cloudProvider.File = s
-			manager := NewMultishareOpsManager(cloudProvider)
-			err = manager.verifyNoRunningInstanceOrShareOpsForInstance(tc.instance, tc.ops)
+			config := &controllerServerConfig{
+				driver:      initTestDriver(t),
+				fileService: s,
+				cloud:       cloudProvider,
+			}
+			mcs := NewMultishareController(config)
+			err = mcs.opsManager.verifyNoRunningInstanceOrShareOpsForInstance(tc.instance, tc.ops)
 			if tc.errorExpected && err == nil {
 				t.Errorf("expected error, found none")
 			}
@@ -1574,10 +1595,16 @@ func TestVerifyNoRunningShareOps(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to fake service: %v", err)
 			}
+
 			cloudProvider, _ := cloud.NewFakeCloud()
 			cloudProvider.File = s
-			manager := NewMultishareOpsManager(cloudProvider)
-			err = manager.verifyNoRunningShareOps(tc.share, tc.ops)
+			config := &controllerServerConfig{
+				driver:      initTestDriver(t),
+				fileService: s,
+				cloud:       cloudProvider,
+			}
+			mcs := NewMultishareController(config)
+			err = mcs.opsManager.verifyNoRunningShareOps(tc.share, tc.ops)
 			if tc.errorExpected && err == nil {
 				t.Errorf("expected error, found none")
 			}
@@ -1606,6 +1633,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 		expectedReadyInstance []*file.MultishareInstance
 		req                   *csi.CreateVolumeRequest
 		target                *file.MultishareInstance
+		expectError           bool
+		features              *GCFSDriverFeatureOptions
 	}{
 		{
 			name: "no instances",
@@ -1614,7 +1643,7 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 			name: "all ready instances",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -1623,8 +1652,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstances: []*file.MultishareInstance{
@@ -1634,19 +1663,19 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
 				{
-					Name:     "test-instance-1",
+					Name:     "test-instance-2",
 					Project:  testProject,
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -1658,8 +1687,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -1669,18 +1698,19 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
 			},
+			expectError: false,
 		},
 		{
 			name: "non-ready instances (instance update)",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -1689,8 +1719,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstances: []*file.MultishareInstance{
@@ -1700,8 +1730,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -1714,12 +1744,13 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Type:   util.InstanceUpdate,
 				},
 			},
+			expectError: true,
 		},
 		{
 			name: "non-ready instances (share create)",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -1728,8 +1759,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstances: []*file.MultishareInstance{
@@ -1739,8 +1770,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -1753,12 +1784,13 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Type:   util.ShareCreate,
 				},
 			},
+			expectError: true,
 		},
 		{
 			name: "non-ready instances (share update)",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -1767,8 +1799,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstances: []*file.MultishareInstance{
@@ -1778,8 +1810,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -1792,12 +1824,13 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Type:   util.ShareUpdate,
 				},
 			},
+			expectError: true,
 		},
 		{
 			name: "non-ready instances (share delete)",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -1806,8 +1839,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstances: []*file.MultishareInstance{
@@ -1817,8 +1850,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -1831,12 +1864,13 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Type:   util.ShareDelete,
 				},
 			},
+			expectError: true,
 		},
 		{
 			name: "non-ready instances 0, instance delete not counted as ready",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -1845,8 +1879,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstances: []*file.MultishareInstance{
@@ -1856,8 +1890,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "DELETING",
 				},
@@ -1874,7 +1908,7 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 			name: "non-ready instances (share delete), ready instance",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -1883,8 +1917,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstances: []*file.MultishareInstance{
@@ -1894,8 +1928,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -1905,8 +1939,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -1918,8 +1952,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -1932,12 +1966,13 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Type:   util.ShareDelete,
 				},
 			},
+			expectError: false,
 		},
 		{
 			name: "no ready instance, no non-ready instance, instance with 10 shares not eligible",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -1946,8 +1981,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstances: []*file.MultishareInstance{
@@ -1957,8 +1992,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -1972,8 +2007,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 						Location: testRegion,
 						Labels: map[string]string{
 							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-							tagKeyClusterLocation:                  testLocation,
-							tagKeyClusterName:                      testClusterName,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
 						},
 					},
 				},
@@ -1985,8 +2020,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 						Location: testRegion,
 						Labels: map[string]string{
 							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-							tagKeyClusterLocation:                  testLocation,
-							tagKeyClusterName:                      testClusterName,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
 						},
 					},
 				},
@@ -1998,8 +2033,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 						Location: testRegion,
 						Labels: map[string]string{
 							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-							tagKeyClusterLocation:                  testLocation,
-							tagKeyClusterName:                      testClusterName,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
 						},
 					},
 				},
@@ -2011,8 +2046,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 						Location: testRegion,
 						Labels: map[string]string{
 							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-							tagKeyClusterLocation:                  testLocation,
-							tagKeyClusterName:                      testClusterName,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
 						},
 					},
 				},
@@ -2024,8 +2059,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 						Location: testRegion,
 						Labels: map[string]string{
 							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-							tagKeyClusterLocation:                  testLocation,
-							tagKeyClusterName:                      testClusterName,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
 						},
 					},
 				},
@@ -2037,8 +2072,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 						Location: testRegion,
 						Labels: map[string]string{
 							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-							tagKeyClusterLocation:                  testLocation,
-							tagKeyClusterName:                      testClusterName,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
 						},
 					},
 				},
@@ -2050,8 +2085,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 						Location: testRegion,
 						Labels: map[string]string{
 							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-							tagKeyClusterLocation:                  testLocation,
-							tagKeyClusterName:                      testClusterName,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
 						},
 					},
 				},
@@ -2063,8 +2098,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 						Location: testRegion,
 						Labels: map[string]string{
 							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-							tagKeyClusterLocation:                  testLocation,
-							tagKeyClusterName:                      testClusterName,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
 						},
 					},
 				},
@@ -2076,8 +2111,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 						Location: testRegion,
 						Labels: map[string]string{
 							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-							tagKeyClusterLocation:                  testLocation,
-							tagKeyClusterName:                      testClusterName,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
 						},
 					},
 				},
@@ -2089,18 +2124,19 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 						Location: testRegion,
 						Labels: map[string]string{
 							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-							tagKeyClusterLocation:                  testLocation,
-							tagKeyClusterName:                      testClusterName,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
 						},
 					},
 				},
 			},
+			expectError: false,
 		},
 		{
 			name: "ready instance, non-ready instances, other instance state not count",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -2109,8 +2145,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstances: []*file.MultishareInstance{
@@ -2120,8 +2156,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "CREATING",
 				},
@@ -2131,8 +2167,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "REPAIRING",
 				},
@@ -2142,8 +2178,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -2153,8 +2189,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -2164,8 +2200,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "ERROR",
 				},
@@ -2175,8 +2211,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "SUSPENDED",
 				},
@@ -2188,8 +2224,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "READY",
 				},
@@ -2202,12 +2238,13 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Type:   util.ShareDelete,
 				},
 			},
+			expectError: false,
 		},
 		{
 			name: "creating instance count as non-ready",
 			req: &csi.CreateVolumeRequest{
 				Parameters: map[string]string{
-					paramMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
 				},
 			},
 			target: &file.MultishareInstance{
@@ -2216,8 +2253,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 				Location: testRegion,
 				Labels: map[string]string{
 					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-					tagKeyClusterLocation:                  testLocation,
-					tagKeyClusterName:                      testClusterName,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
 				},
 			},
 			initInstances: []*file.MultishareInstance{
@@ -2227,8 +2264,8 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "CREATING",
 				},
@@ -2238,18 +2275,188 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 					Location: testRegion,
 					Labels: map[string]string{
 						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
-						tagKeyClusterLocation:                  testLocation,
-						tagKeyClusterName:                      testClusterName,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
 					},
 					State: "ERROR",
 				},
 			},
 			expectedNonReadyCount: 1,
+			expectError:           true,
 			ops: []*OpInfo{
 				{
 					Id:     "op1",
 					Target: "projects/test-project/locations/us-central1/instances/instance-1",
 					Type:   util.InstanceCreate,
+				},
+			},
+		},
+		{
+			name: "instance exhausted with max shares, no ready instance found",
+			features: &GCFSDriverFeatureOptions{
+				FeatureMaxSharesPerInstance: &FeatureMaxSharesPerInstance{
+					Enabled: true,
+				},
+			},
+			req: &csi.CreateVolumeRequest{
+				Parameters: map[string]string{
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
+				},
+			},
+			target: &file.MultishareInstance{
+				Name:     "test-target-instance",
+				Project:  testProject,
+				Location: testRegion,
+				Labels: map[string]string{
+					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
+				},
+			},
+			initInstances: []*file.MultishareInstance{
+				{
+					Name:     "instance-1",
+					Project:  testProject,
+					Location: testRegion,
+					Labels: map[string]string{
+						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
+					},
+					State:         "READY",
+					MaxShareCount: 2,
+				},
+			},
+			initShares: []*file.Share{
+				{
+					Name: "share-1",
+					Parent: &file.MultishareInstance{
+						Name:     "instance-1",
+						Project:  testProject,
+						Location: testRegion,
+						Labels: map[string]string{
+							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
+						},
+					},
+				},
+				{
+					Name: "share-2",
+					Parent: &file.MultishareInstance{
+						Name:     "instance-1",
+						Project:  testProject,
+						Location: testRegion,
+						Labels: map[string]string{
+							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "1 instance exhausted with max shares, 1 ready instance with less than max share count",
+			features: &GCFSDriverFeatureOptions{
+				FeatureMaxSharesPerInstance: &FeatureMaxSharesPerInstance{
+					Enabled: true,
+				},
+			},
+			req: &csi.CreateVolumeRequest{
+				Parameters: map[string]string{
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
+				},
+			},
+			target: &file.MultishareInstance{
+				Name:     "test-target-instance",
+				Project:  testProject,
+				Location: testRegion,
+				Labels: map[string]string{
+					util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+					TagKeyClusterLocation:                  testLocation,
+					TagKeyClusterName:                      testClusterName,
+				},
+			},
+			initInstances: []*file.MultishareInstance{
+				{
+					Name:     "instance-1",
+					Project:  testProject,
+					Location: testRegion,
+					Labels: map[string]string{
+						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
+					},
+					State:         "READY",
+					MaxShareCount: 2,
+				},
+				{
+					Name:     "instance-2",
+					Project:  testProject,
+					Location: testRegion,
+					Labels: map[string]string{
+						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
+					},
+					State:         "READY",
+					MaxShareCount: 10,
+				},
+			},
+			initShares: []*file.Share{
+				{
+					Name: "share-1",
+					Parent: &file.MultishareInstance{
+						Name:     "instance-1",
+						Project:  testProject,
+						Location: testRegion,
+						Labels: map[string]string{
+							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
+						},
+					},
+				},
+				{
+					Name: "share-2",
+					Parent: &file.MultishareInstance{
+						Name:     "instance-1",
+						Project:  testProject,
+						Location: testRegion,
+						Labels: map[string]string{
+							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
+						},
+					},
+				},
+				{
+					Name: "share-3",
+					Parent: &file.MultishareInstance{
+						Name:     "instance-2",
+						Project:  testProject,
+						Location: testRegion,
+						Labels: map[string]string{
+							util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+							TagKeyClusterLocation:                  testLocation,
+							TagKeyClusterName:                      testClusterName,
+						},
+					},
+				},
+			},
+			expectedReadyInstance: []*file.MultishareInstance{
+				{
+					Name:     "instance-2",
+					Project:  testProject,
+					Location: testRegion,
+					Labels: map[string]string{
+						util.ParamMultishareInstanceScLabelKey: testInstanceScPrefix,
+						TagKeyClusterLocation:                  testLocation,
+						TagKeyClusterName:                      testClusterName,
+					},
+					State:         "READY",
+					MaxShareCount: 10,
 				},
 			},
 		},
@@ -2262,13 +2469,23 @@ func TestRunEligibleInstanceCheck(t *testing.T) {
 			}
 			cloudProvider, _ := cloud.NewFakeCloud()
 			cloudProvider.File = s
-			manager := NewMultishareOpsManager(cloudProvider)
-			ready, nonReady, err := manager.runEligibleInstanceCheck(context.Background(), tc.req, tc.ops, tc.target, testRegions)
-			if err != nil {
+			config := &controllerServerConfig{
+				driver:      initTestDriver(t),
+				fileService: s,
+				cloud:       cloudProvider,
+				features:    tc.features,
+			}
+			mcs := NewMultishareController(config)
+			ready, err := mcs.opsManager.runEligibleInstanceCheck(context.Background(), tc.req, tc.ops, tc.target, testRegions)
+			if err != nil && !tc.expectError {
 				t.Errorf("unexpected error")
 			}
-			if nonReady != tc.expectedNonReadyCount {
-				t.Errorf("got %d, want %d", nonReady, tc.expectedNonReadyCount)
+
+			if tc.expectError && err == nil {
+				t.Errorf("expected error")
+			}
+			if len(ready) != len(tc.expectedReadyInstance) {
+				t.Errorf("Mismatch in expected ready instances count, ready %d, expected %d", len(ready), len(tc.expectedReadyInstance))
 			}
 			for _, r := range ready {
 				if !found(tc.expectedReadyInstance, r) {

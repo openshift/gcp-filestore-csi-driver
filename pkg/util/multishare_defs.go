@@ -16,6 +16,8 @@ limitations under the License.
 
 package util
 
+import "time"
+
 const (
 	InstanceURISplitLen        = 6
 	ShareURISplitLen           = 8
@@ -25,9 +27,21 @@ const (
 	MaxMultishareInstanceSizeBytes    int64 = 10 * Tb
 	MaxShareSizeBytes                 int64 = 1 * Tb
 	MinShareSizeBytes                 int64 = 100 * Gb
+	DefaultStepSizeGb                 int64 = MinMultishareInstanceSizeBytes / Gb
 	MaxSharesPerInstance                    = 10
 	NewMultishareInstancePrefix             = "fs-"
 	ParamMultishareInstanceScLabelKey       = "storage_gke_io_storage-class-id"
+
+	// This finalizer protects custom resource objects (shareInfo and instanceInfo) from being cleaned up by the API server.
+	// Clients will Delete the custom resource objects to express intent for filestore resource deletion and after the
+	// resource deletion is done this Finalizer will be removed and the object will be cleaned up.
+	FilestoreResourceCleanupFinalizer = "multishare.filestore.csi.storage.gke.io/resource-cleanup-protection"
+
+	OpTimeLayout = "2023-04-10T22:58:52.014103834Z"
+	ErrRetention = 15 * time.Minute
+
+	// configurable max shares consts
+	ConfigurablePackMinShareSizeBytes int64 = 10 * Gb
 )
 
 type OperationType int
