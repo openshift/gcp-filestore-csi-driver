@@ -126,7 +126,7 @@ Note that non-default networks require extra [firewall setup](https://cloud.goog
 ```
 mkdir -p $GOPATH/src/sigs.k8s.io
 cd $GOPATH/src/sigs.k8s.io
-git clone https://github.com/kubernetes-sigs/gcp-filestore-csi-driver.git
+git clone https://github.com/openshift/gcp-filestore-csi-driver.git
 ```
 
 * Set up a service account with appropriate role binds, and download a service account key. This
