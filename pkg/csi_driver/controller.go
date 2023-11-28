@@ -42,6 +42,7 @@ const (
 	basicHDDTier   = "basic_hdd"
 	basicSSDTier   = "basic_ssd"
 	highScaleTier  = "high_scale_ssd"
+	zonalTier      = "zonal"
 	defaultNetwork = "default"
 
 	defaultTierMinSize    = 1 * util.Tb
@@ -50,6 +51,8 @@ const (
 	enterpriseTierMaxSize = 10 * util.Tb
 	highScaleTierMinSize  = 10 * util.Tb
 	highScaleTierMaxSize  = 100 * util.Tb
+	zonalTierMinSize      = 1 * util.Tb
+	zonalTierMaxSize      = 100 * util.Tb
 	premiumTierMinSize    = 25 * util.Tb / 10
 	premiumTierMaxSize    = 639 * util.Tb / 10
 
@@ -93,6 +96,7 @@ const (
 	tagKeyCreatedForClaimName      = "kubernetes_io_created-for_pvc_name"
 	tagKeyCreatedForVolumeName     = "kubernetes_io_created-for_pv_name"
 	tagKeyCreatedBy                = "storage_gke_io_created-by"
+	tagKeySnapshotName             = "storage_gke_io_created-for_csi_snapshot_name"
 	TagKeyClusterName              = "storage_gke_io_cluster_name"
 	TagKeyClusterLocation          = "storage_gke_io_cluster_location"
 )
@@ -131,9 +135,13 @@ func newControllerServer(config *controllerServerConfig) csi.ControllerServer {
 	if config.enableMultishare {
 		config.multiShareController = NewMultishareController(config)
 		config.multiShareController.opsManager.controllerServer = cs
-		if config.features.FeatureStateful.Enabled {
-			config.statefulController = NewMultishareStatefulController(config)
-			config.statefulController.mc = config.multiShareController
+		features := config.features
+		if features != nil {
+			if features.FeatureStateful.Enabled {
+				config.statefulController = NewMultishareStatefulController(config)
+				config.statefulController.mc = config.multiShareController
+			}
+
 		}
 	}
 	if config.reconciler != nil {
@@ -186,6 +194,12 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+
+	// we do not yet support zonal small
+	if tier == zonalTier && capBytes < highScaleTierMinSize {
+		return nil, status.Error(codes.InvalidArgument, "gke does not support zonal small band yet.")
+	}
+
 	klog.V(5).Infof("Using capacity bytes %q for volume %q", capBytes, name)
 
 	newFiler, err := s.generateNewFileInstance(name, capBytes, req.GetParameters(), req.GetAccessibilityRequirements())
@@ -214,10 +228,7 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 			_, err = s.config.fileService.GetBackup(ctx, id)
 			if err != nil {
 				klog.Errorf("Failed to get volume %v source snapshot %v: %v", name, id, err.Error())
-				if errCode := file.IsUserError(err); errCode != nil {
-					return nil, status.Error(*errCode, err.Error())
-				}
-				return nil, status.Errorf(codes.Internal, "Failed to get snapshot %v: %v", id, err.Error())
+				return nil, file.StatusError(err)
 			}
 			sourceSnapshotId = id
 		}
@@ -227,10 +238,7 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	filer, err := s.config.fileService.GetInstance(ctx, newFiler)
 	// No error is returned if the instance is not found during CreateVolume.
 	if err != nil && !file.IsNotFoundErr(err) {
-		if errCode := file.IsUserError(err); errCode != nil {
-			return nil, status.Error(*errCode, err.Error())
-		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, file.StatusError(err)
 	}
 
 	if filer != nil {
@@ -269,7 +277,7 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 			// In case of abort, the CIDR IP is released and available for reservation
 			defer s.config.ipAllocator.ReleaseIPRange(reservedIPRange)
 			if err != nil {
-				return nil, err
+				return nil, file.StatusError(err)
 			}
 
 			// Adding the reserved IP range to the instance object
@@ -279,7 +287,7 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		// Add labels.
 		labels, err := extractLabels(param, s.config.driver.config.Name)
 		if err != nil {
-			return nil, err
+			return nil, file.StatusError(err)
 		}
 		// Append extra lables from the command line option
 		for k, v := range s.config.extraVolumeLabels {
@@ -296,10 +304,7 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		}
 		if createErr != nil {
 			klog.Errorf("Create volume for volume Id %s failed: %v", volumeID, createErr.Error())
-			if errCode := file.IsUserError(createErr); errCode != nil {
-				return nil, status.Error(*errCode, createErr.Error())
-			}
-			return nil, status.Error(codes.Internal, createErr.Error())
+			return nil, file.StatusError(createErr)
 		}
 	}
 	resp := &csi.CreateVolumeResponse{Volume: s.fileInstanceToCSIVolume(filer, modeInstance, sourceSnapshotId)}
@@ -316,6 +321,9 @@ func (s *controllerServer) reserveIPRange(ctx context.Context, filer *file.Servi
 	ipRangeSize := util.IpRangeSize
 	if filer.Tier == enterpriseTier {
 		ipRangeSize = util.IpRangeSizeEnterprise
+	}
+	if filer.Tier == highScaleTier || filer.Tier == zonalTier {
+		ipRangeSize = util.IpRangeSizeHighScale
 	}
 	unreservedIPBlock, err := s.config.ipAllocator.GetUnreservedIPRange(cidr, ipRangeSize, cloudInstancesReservedIPRanges)
 	if err != nil {
@@ -378,7 +386,10 @@ func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 		duration := time.Since(start)
 		s.config.metricsManager.RecordOperationMetrics(err, methodDeleteVolume, modeMultishare, duration)
 		klog.Infof("Deletevolume response %+v error %v, for request: %+v", response, err, req)
-		return response, err
+		if err != nil {
+			return response, file.StatusError(err)
+		}
+		return response, nil
 	}
 
 	filer, _, err := getFileInstanceFromID(volumeID)
@@ -399,10 +410,7 @@ func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 		if file.IsNotFoundErr(err) {
 			return &csi.DeleteVolumeResponse{}, nil
 		}
-		if errCode := file.IsUserError(err); errCode != nil {
-			return nil, status.Error(*errCode, err.Error())
-		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, file.StatusError(err)
 	}
 
 	if filer.State == "DELETING" {
@@ -412,7 +420,7 @@ func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 	err = s.config.fileService.DeleteInstance(ctx, filer)
 	if err != nil {
 		klog.Errorf("Delete volume for volume Id %s failed: %v", volumeID, err.Error())
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, file.StatusError(err)
 	}
 
 	klog.Infof("DeleteVolume succeeded for volume %v", volumeID)
@@ -439,10 +447,7 @@ func (s *controllerServer) ValidateVolumeCapabilities(ctx context.Context, req *
 	filer.Project = s.config.cloud.Project
 	newFiler, err := s.config.fileService.GetInstance(ctx, filer)
 	if err != nil && !file.IsNotFoundErr(err) {
-		if errCode := file.IsUserError(err); errCode != nil {
-			return nil, status.Error(*errCode, err.Error())
-		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, file.StatusError(err)
 	}
 	if newFiler == nil {
 		return nil, status.Errorf(codes.NotFound, "volume %v doesn't exist", volumeID)
@@ -481,8 +486,7 @@ func getTierFromParams(params map[string]string) string {
 }
 
 // validator function to check for invalid capacity size requests
-func invalidCapacityRange(capRange *csi.CapacityRange, tier string) error {
-	validRange := provisionableCapacityForTier(tier)
+func invalidCapacityRange(capRange *csi.CapacityRange, tier string, validRange *capacityRangeForTier) error {
 
 	requiredCap := capRange.GetRequiredBytes()
 	requireSet := requiredCap > 0
@@ -518,15 +522,17 @@ func invalidCapacityRange(capRange *csi.CapacityRange, tier string) error {
 }
 
 // init function to get min and max volume sizes per tier
-func provisionableCapacityForTier(tier string) capacityRangeForTier {
+func provisionableCapacityForTier(tier string) *capacityRangeForTier {
 	defaultRange := capacityRangeForTier{min: defaultTierMinSize, max: defaultTierMaxSize}
 	enterpriseRange := capacityRangeForTier{min: enterpriseTierMinSize, max: enterpriseTierMaxSize}
 	highScaleRange := capacityRangeForTier{min: highScaleTierMinSize, max: highScaleTierMaxSize}
 	premiumRange := capacityRangeForTier{min: premiumTierMinSize, max: premiumTierMaxSize}
+	zonalRange := capacityRangeForTier{min: zonalTierMinSize, max: zonalTierMaxSize}
 	provisionableCapacityForTier := map[string]capacityRangeForTier{
 		defaultTier:    defaultRange,
 		enterpriseTier: enterpriseRange,
 		highScaleTier:  highScaleRange,
+		zonalTier:      zonalRange,
 		premiumTier:    premiumRange,
 		basicSSDTier:   premiumRange, //these two are aliases
 		basicHDDTier:   defaultRange, //these two are aliases
@@ -536,7 +542,7 @@ func provisionableCapacityForTier(tier string) capacityRangeForTier {
 	if !ok {
 		validRange = provisionableCapacityForTier[defaultTier]
 	}
-	return validRange
+	return &validRange
 }
 
 // getRequestCapacity returns the volume size that should be provisioned
@@ -547,7 +553,7 @@ func getRequestCapacity(capRange *csi.CapacityRange, tier string) (int64, error)
 		return validRange.min, nil
 	}
 
-	if err := invalidCapacityRange(capRange, tier); err != nil {
+	if err := invalidCapacityRange(capRange, tier, validRange); err != nil {
 		return 0, err
 	}
 
@@ -611,9 +617,6 @@ func (s *controllerServer) generateNewFileInstance(name string, capBytes int64, 
 		default:
 			return nil, fmt.Errorf("invalid parameter %q", k)
 		}
-	}
-	if kmsKeyName != "" && tier != enterpriseTier {
-		return nil, fmt.Errorf("KMS Key data encryption is only supported for enterprise tier instances")
 	}
 	return &file.ServiceInstance{
 		Project:  s.config.cloud.Project,
@@ -702,10 +705,7 @@ func (s *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 	filer.Project = s.config.cloud.Project
 	filer, err = s.config.fileService.GetInstance(ctx, filer)
 	if err != nil {
-		if errCode := file.IsUserError(err); errCode != nil {
-			return nil, status.Error(*errCode, err.Error())
-		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, file.StatusError(err)
 	}
 	if filer.State != "READY" {
 		return nil, fmt.Errorf("lolume %q is not yet ready, current state %q", volumeID, filer.State)
@@ -721,7 +721,7 @@ func (s *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 
 	hasPendingOps, err := s.config.fileService.HasOperations(ctx, filer, "update", false /* done */)
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, file.StatusError(err)
 	}
 
 	if hasPendingOps {
@@ -731,7 +731,7 @@ func (s *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 	filer.Volume.SizeBytes = reqBytes
 	newfiler, err := s.config.fileService.ResizeInstance(ctx, filer)
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, file.StatusError(err)
 	}
 
 	klog.Infof("Controller expand volume succeeded for volume %v, new size(bytes): %v", volumeID, newfiler.Volume.SizeBytes)
@@ -869,7 +869,15 @@ func (s *controllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSn
 		return nil, status.Error(codes.InvalidArgument, "CreateSnapshot source volume ID must be provided")
 	}
 	if isMultishareVolId(volumeID) {
-		return nil, status.Error(codes.InvalidArgument, "CreateSnapshot is not supported for multishare backed volumes")
+		if s.config.multiShareController == nil {
+			return nil, status.Error(codes.InvalidArgument, "multishare controller not enabled")
+		}
+		start := time.Now()
+		response, err := s.config.multiShareController.CreateSnapshot(ctx, req)
+		duration := time.Since(start)
+		s.config.metricsManager.RecordOperationMetrics(err, methodCreateSnapshot, modeMultishare, duration)
+		klog.Infof("CreateSnapshot response %+v error %v, for request %+v", response, err, req)
+		return response, err
 	}
 
 	if acquired := s.config.volumeLocks.TryAcquire(volumeID); !acquired {
@@ -877,12 +885,11 @@ func (s *controllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSn
 	}
 	defer s.config.volumeLocks.Release(volumeID)
 
-	filer, _, err := getFileInstanceFromID(volumeID)
+	backupInfo, err := gatherBackupInfo(req.Name, volumeID, s.config.cloud.Project)
 	if err != nil {
 		klog.Errorf("Failed to get instance for volumeID %v snapshot, error: %v", volumeID, err.Error())
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	filer.Project = s.config.cloud.Project
 	// If parameters are empty we assume 'backup' type by default.
 	if req.GetParameters() != nil {
 		if _, err := util.IsSnapshotTypeSupported(req.GetParameters()); err != nil {
@@ -891,71 +898,69 @@ func (s *controllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSn
 	}
 
 	// Check for existing snapshot
-	backupUri, _, err := file.CreateBackupURI(filer, req.Name, util.GetBackupLocation(req.GetParameters()))
+	backupLocation := util.GetBackupLocation(req.GetParameters())
+	backupUri, region, err := file.CreateBackupURI(backupInfo.Location, backupInfo.Project, backupInfo.Name, backupLocation)
+	backupInfo.Location = region
+	backupInfo.BackupURI = backupUri
 	if err != nil {
-		return nil, err
+		klog.Errorf("Failed to create backup URI from given name %s and location %s, error: %v", req.Name, backupLocation, err.Error())
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	backupInfo, err := s.config.fileService.GetBackup(ctx, backupUri)
+	existingBackup, err := s.config.fileService.GetBackup(ctx, backupUri)
+	backupExists, err := file.CheckBackupExists(existingBackup, err)
 	if err != nil {
-		if !file.IsNotFoundErr(err) {
-			return nil, status.Error(codes.Internal, err.Error())
-		}
-	} else {
-		backupSourceCSIHandle, err := util.BackupVolumeSourceToCSIVolumeHandle(backupInfo.SourceInstance, backupInfo.SourceShare)
+		return nil, file.StatusError(err)
+	}
+
+	if backupExists {
+		// process existing backup
+		snapshot, err := file.ProcessExistingBackup(ctx, existingBackup, volumeID, modeInstance)
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "Cannot determine volume handle from back source instance %s, share %s", backupInfo.SourceInstance, backupInfo.SourceShare)
+			return nil, err
 		}
-		if backupSourceCSIHandle != volumeID {
-			return nil, status.Errorf(codes.AlreadyExists, "Backup already exists with a different source volume %s, input source volume %s", backupSourceCSIHandle, volumeID)
-		}
-		// Check if backup is in the process of getting created.
-		if backupInfo.Backup.State == "CREATING" || backupInfo.Backup.State == "FINALIZING" {
-			return nil, status.Errorf(codes.DeadlineExceeded, "Backup %v not yet ready, current state %s", backupInfo.Backup.Name, backupInfo.Backup.State)
-		}
-		if backupInfo.Backup.State != "READY" {
-			return nil, status.Errorf(codes.Internal, "Backup %v not yet ready, current state %s", backupInfo.Backup.Name, backupInfo.Backup.State)
-		}
-		tp, err := util.ParseTimestamp(backupInfo.Backup.CreateTime)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to parse create timestamp for backup %v", backupInfo.Backup.Name)
-		}
-		klog.V(4).Infof("CreateSnapshot success for volume %v, Backup Id: %v", volumeID, backupInfo.Backup.Name)
 		return &csi.CreateSnapshotResponse{
+			Snapshot: snapshot,
+		}, nil
+	} else {
+		// create new backup
+
+		labels, err := extractBackupLabels(req.GetParameters(), s.config.driver.config.Name, req.Name)
+		if err != nil {
+			return nil, err
+		}
+		backupInfo.Labels = labels
+
+		backupObj, err := s.config.fileService.CreateBackup(ctx, backupInfo)
+		if err != nil {
+			klog.Errorf("Create snapshot for volume Id %s failed: %v", volumeID, err.Error())
+			return nil, file.StatusError(err)
+		}
+		tp, err := util.ParseTimestamp(backupObj.CreateTime)
+		if err != nil {
+			return nil, file.StatusError(err)
+		}
+		resp := &csi.CreateSnapshotResponse{
 			Snapshot: &csi.Snapshot{
-				SizeBytes:      util.GbToBytes(backupInfo.Backup.CapacityGb),
-				SnapshotId:     backupInfo.Backup.Name,
+				SizeBytes:      util.GbToBytes(backupObj.CapacityGb),
+				SnapshotId:     backupObj.Name,
 				SourceVolumeId: volumeID,
 				CreationTime:   tp,
 				ReadyToUse:     true,
 			},
-		}, nil
+		}
+		klog.V(4).Infof("CreateSnapshot succeeded for volume %v, Backup Id: %v", volumeID, backupObj.Name)
+		return resp, nil
 	}
 
-	backupObj, err := s.config.fileService.CreateBackup(ctx, filer, req.Name, util.GetBackupLocation(req.GetParameters()))
+}
+
+func extractBackupLabels(parameters map[string]string, driverName string, snapshotName string) (map[string]string, error) {
+	labels, err := extractLabels(parameters, driverName)
 	if err != nil {
-		klog.Errorf("Create snapshot for volume Id %s failed: %v", volumeID, err.Error())
-		if err != nil {
-			if errCode := file.IsUserError(err); errCode != nil {
-				return nil, status.Error(*errCode, err.Error())
-			}
-			return nil, status.Error(codes.Internal, err.Error())
-		}
+		return nil, err
 	}
-	tp, err := util.ParseTimestamp(backupObj.CreateTime)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	resp := &csi.CreateSnapshotResponse{
-		Snapshot: &csi.Snapshot{
-			SizeBytes:      util.GbToBytes(backupObj.CapacityGb),
-			SnapshotId:     backupObj.Name,
-			SourceVolumeId: volumeID,
-			CreationTime:   tp,
-			ReadyToUse:     true,
-		},
-	}
-	klog.V(4).Infof("CreateSnapshot succeeded for volume %v, Backup Id: %v", volumeID, backupObj.Name)
-	return resp, nil
+	labels[tagKeySnapshotName] = snapshotName
+	return labels, nil
 }
 
 func (s *controllerServer) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshotRequest) (*csi.DeleteSnapshotResponse, error) {
@@ -976,22 +981,22 @@ func (s *controllerServer) DeleteSnapshot(ctx context.Context, req *csi.DeleteSn
 		return nil, status.Error(codes.InvalidArgument, "deletion is only supported for volume snapshots of type backup")
 	}
 
-	backupInfo, err := s.config.fileService.GetBackup(ctx, id)
+	backup, err := s.config.fileService.GetBackup(ctx, id)
 	if err != nil {
 		if file.IsNotFoundErr(err) {
 			klog.Infof("Volume snapshot with ID %v not found", id)
 			return &csi.DeleteSnapshotResponse{}, nil
 		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, file.StatusError(err)
 	}
 
-	if backupInfo.Backup.State == "DELETING" {
-		return nil, status.Errorf(codes.DeadlineExceeded, "Volume snapshot with ID %v is in state %s", id, backupInfo.Backup.State)
+	if backup.Backup.State == "DELETING" {
+		return nil, status.Errorf(codes.DeadlineExceeded, "Volume snapshot with ID %v is in state %s", id, backup.Backup.State)
 	}
 
 	if err = s.config.fileService.DeleteBackup(ctx, id); err != nil {
 		klog.Errorf("Delete snapshot for backup Id %s failed: %v", id, err.Error())
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, file.StatusError(err)
 	}
 
 	return &csi.DeleteSnapshotResponse{}, nil

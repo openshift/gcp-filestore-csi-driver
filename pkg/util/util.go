@@ -28,7 +28,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"sigs.k8s.io/gcp-filestore-csi-driver/pkg/apis/multishare/v1beta1"
+	v1 "sigs.k8s.io/gcp-filestore-csi-driver/pkg/apis/multishare/v1"
 )
 
 const (
@@ -50,7 +50,9 @@ const (
 	snapshotTotalElements = 6
 
 	// number of elements in backup Volume sources e.g. projects/{project name}/locations/{zone}/instances/{name}
-	volumeTotalElements = 6
+	singleShareVolumeTotalElements = 6
+	// number of elements in backup Volume sources e.g. projects/{project name}/locations/{zone}/instances/{name}/shares/{share}'
+	multiShareVolumeTotalElements = 8
 
 	ManagedFilestoreCSINamespace = "gke-managed-filestorecsi"
 )
@@ -148,14 +150,14 @@ func ConvertLabelsStringToMap(labels string) (map[string]string, error) {
 	return labelsMap, nil
 }
 
+// GetRegionFromZone return the corresponding region name based on a zone name
+// Example "us-central1-a" return "us-central1"
 func GetRegionFromZone(location string) (string, error) {
 	tokens := strings.Split(location, "-")
 	if len(tokens) != 3 {
-		return "", fmt.Errorf("Failed to parse location %v", location)
+		return "", fmt.Errorf("failed to parse location %v", location)
 	}
-
-	tokens = tokens[:2]
-	return strings.Join(tokens, "-"), nil
+	return strings.Join(tokens[0:2], "-"), nil
 }
 
 func ParseTimestamp(timestamp string) (*timestamppb.Timestamp, error) {
@@ -203,12 +205,18 @@ func GetBackupLocation(params map[string]string) string {
 	return location
 }
 
-func BackupVolumeSourceToCSIVolumeHandle(sourceInstance, sourceShare string) (string, error) {
+func BackupVolumeSourceToCSIVolumeHandle(mode, sourceInstance, sourceShare string) (string, error) {
 	splitId := strings.Split(sourceInstance, "/")
-	if len(splitId) != volumeTotalElements {
-		return "", fmt.Errorf("Failed to get id components. Expected 'projects/{project}/location/{zone}/instances/{name}'. Got: %s", sourceInstance)
+	if mode == "modeInstance" {
+		if len(splitId) != singleShareVolumeTotalElements {
+			return "", fmt.Errorf("Failed to get id components. Expected 'projects/{project}/location/{zone}/instances/{name}'. Got: %s", sourceInstance)
+		}
+	} else {
+		if len(splitId) != multiShareVolumeTotalElements {
+			return "", fmt.Errorf("Failed to get id components. Expected 'projects/{project}/location/{zone}/instances/{name}/shares/{share}'. Got: %s", sourceInstance)
+		}
 	}
-	return fmt.Sprintf("modeInstance/%s/%s/%s", splitId[3], splitId[5], sourceShare), nil
+	return fmt.Sprintf("%s/%s/%s/%s", mode, splitId[3], splitId[5], sourceShare), nil
 }
 
 // Multishare util functions.
@@ -296,27 +304,27 @@ func ErrCodePtr(code codes.Code) *codes.Code {
 	return &code
 }
 
-func ShareStateToCRDStatus(state string) (v1beta1.FilestoreStatus, error) {
+func ShareStateToCRDStatus(state string) (v1.FilestoreStatus, error) {
 	switch state {
 	case "CREATING":
-		return v1beta1.CREATING, nil
+		return v1.CREATING, nil
 	case "READY":
-		return v1beta1.READY, nil
+		return v1.READY, nil
 	case "DELETING", "STATE_UNSPECIFIED":
-		return v1beta1.UPDATING, nil
+		return v1.UPDATING, nil
 	default:
 		return "", fmt.Errorf("Unknown share state: %q", state)
 	}
 }
 
-func InstanceStateToCRDStatus(state string) (v1beta1.FilestoreStatus, error) {
+func InstanceStateToCRDStatus(state string) (v1.FilestoreStatus, error) {
 	switch state {
 	case "CREATING":
-		return v1beta1.CREATING, nil
+		return v1.CREATING, nil
 	case "READY":
-		return v1beta1.READY, nil
+		return v1.READY, nil
 	case "DELETING", "STATE_UNSPECIFIED", "REPAIRING", "ERROR", "RESTORING", "SUSPENDED", "REVERTING", "RESUMING":
-		return v1beta1.UPDATING, nil
+		return v1.UPDATING, nil
 	default:
 		return "", fmt.Errorf("Unknown share state: %q", state)
 	}

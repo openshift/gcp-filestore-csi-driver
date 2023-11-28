@@ -46,6 +46,8 @@ const (
 	methodCreateVolume              = "CreateVolume"
 	methodDeleteVolume              = "DeleteVolume"
 	methodExpandVolume              = "ExpandVolume"
+	methodCreateSnapshot            = "CreateSnapshot"
+	methodDeleteSnapshot            = "DeleteSnapshot"
 	ecfsDataPlaneVersionFormat      = "GoogleReserved-CustomVMImage=clh.image.ems.path:projects/%s/global/images/ems-filestore-scaleout-%s"
 	ecfsCustom100sharesConfigFormat = "GoogleReservedOverrides={\"CustomMultiShareConfig\":{\"MaxShareCount\": %d, \"MinShareSizeGB\":%d}}"
 
@@ -64,6 +66,7 @@ type MultishareController struct {
 	isRegional                 bool
 	clustername                string
 	featureMaxSharePerInstance bool
+	featureMultishareBackups   bool
 
 	// Filestore instance description overrides
 	descOverrideMaxSharesPerInstance string
@@ -97,6 +100,10 @@ func NewMultishareController(config *controllerServerConfig) *MultishareControll
 		c.pvListerSynced = pvInformer.Informer().HasSynced
 	}
 
+	if config.features != nil && config.features.FeatureMultishareBackups != nil {
+		c.featureMultishareBackups = config.features.FeatureMultishareBackups.Enabled
+	}
+
 	return c
 }
 
@@ -122,8 +129,10 @@ func (m *MultishareController) CreateVolume(ctx context.Context, req *csi.Create
 	if err := m.driver.validateVolumeCapabilities(req.GetVolumeCapabilities()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if req.GetVolumeContentSource() != nil {
-		return nil, status.Error(codes.InvalidArgument, "Multishare backed volumes do not support volume content source")
+
+	sourceSnapshotId, err := m.checkVolumeContentSource(ctx, req)
+	if err != nil {
+		return nil, err
 	}
 
 	instanceScPrefix, err := getInstanceSCLabel(req)
@@ -131,7 +140,7 @@ func (m *MultishareController) CreateVolume(ctx context.Context, req *csi.Create
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	maxSharesPerInstance, maxShareSizeSizeBytes, err := m.parseMaxVolumeSizeParam(req)
+	maxSharesPerInstance, maxShareSizeSizeBytes, err := m.parseMaxVolumeSizeParam(req.GetParameters())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -153,10 +162,10 @@ func (m *MultishareController) CreateVolume(ctx context.Context, req *csi.Create
 	}
 	defer m.volumeLocks.Release(name)
 
-	// If no eligible instance found, the ops manager may decide to create a new instance. Prepare a multishare instacne object for such a scenario.
+	// If no eligible instance found, the ops manager may decide to create a new instance. Prepare a multishare instance object for such a scenario.
 	instance, err := m.generateNewMultishareInstance(util.NewMultishareInstancePrefix+string(uuid.NewUUID()), req, maxSharesPerInstance)
 	if err != nil {
-		return nil, err
+		return nil, file.StatusError(err)
 	}
 
 	if m.featureMaxSharePerInstance && m.descOverrideMaxSharesPerInstance != "" && m.descOverrideMinShareSizeBytes != "" {
@@ -171,38 +180,39 @@ func (m *MultishareController) CreateVolume(ctx context.Context, req *csi.Create
 		instance.Description = fmt.Sprintf(ecfsCustom100sharesConfigFormat, sharesPerInstance, minShareSizeGB)
 	}
 
-	workflow, share, err := m.opsManager.setupEligibleInstanceAndStartWorkflow(ctx, req, instance)
+	workflow, share, err := m.opsManager.setupEligibleInstanceAndStartWorkflow(ctx, req, instance, sourceSnapshotId)
 	if err != nil {
-		return nil, err
+		return nil, file.StatusError(err)
 	}
 
 	if share != nil {
-		return m.getShareAndGenerateCSICreateVolumeResponse(ctx, instanceScPrefix, share, maxShareSizeSizeBytes)
+		resp, err := m.getShareAndGenerateCSICreateVolumeResponse(ctx, instanceScPrefix, share, maxShareSizeSizeBytes)
+		return resp, file.StatusError(err)
 	}
 
 	// lock released. poll for op.
 	err = m.waitOnWorkflow(ctx, workflow)
 	if err != nil {
-		errCode := file.PollOpErrorCode(err)
-		return nil, status.Errorf(*errCode, "Create Volume failed, operation %q poll error: %v", workflow.opName, err)
+		return nil, file.StatusError(fmt.Errorf("Create Volume failed, operation %q poll error: %w", workflow.opName, err))
 	}
 
 	klog.Infof("Poll for operation %s (type %s) completed", workflow.opName, workflow.opType.String())
 	if workflow.opType == util.ShareCreate {
-		return m.getShareAndGenerateCSICreateVolumeResponse(ctx, instanceScPrefix, workflow.share, maxShareSizeSizeBytes)
+		resp, err := m.getShareAndGenerateCSICreateVolumeResponse(ctx, instanceScPrefix, workflow.share, maxShareSizeSizeBytes)
+		return resp, file.StatusError(err)
 	}
 
 	var shareCreateWorkflow *Workflow
 	var newShare *file.Share
 	switch workflow.opType {
 	case util.InstanceCreate, util.InstanceUpdate:
-		newShare, err = generateNewShare(util.ConvertVolToShareName(req.Name), workflow.instance, req)
+		newShare, err = generateNewShare(util.ConvertVolToShareName(req.Name), workflow.instance, req, sourceSnapshotId)
 		if err != nil {
-			return nil, err
+			return nil, file.StatusError(err)
 		}
 		shareCreateWorkflow, err = m.opsManager.startShareCreateWorkflowSafe(ctx, newShare)
 		if err != nil {
-			return nil, err
+			return nil, file.StatusError(err)
 		}
 	default:
 		return nil, status.Errorf(codes.Internal, "Create Volume failed, unknown workflow %v detected", workflow.opType)
@@ -211,16 +221,114 @@ func (m *MultishareController) CreateVolume(ctx context.Context, req *csi.Create
 	// lock released. poll for share create op.
 	err = m.waitOnWorkflow(ctx, shareCreateWorkflow)
 	if err != nil {
-		errCode := file.PollOpErrorCode(err)
-		return nil, status.Errorf(*errCode, "%s operation %q poll error: %v", shareCreateWorkflow.opType.String(), shareCreateWorkflow.opName, err)
+		return nil, file.StatusError(fmt.Errorf("%v operation %q poll error: %w", shareCreateWorkflow.opType, shareCreateWorkflow.opName, err))
 	}
-	return m.getShareAndGenerateCSICreateVolumeResponse(ctx, instanceScPrefix, newShare, maxShareSizeSizeBytes)
+	resp, err := m.getShareAndGenerateCSICreateVolumeResponse(ctx, instanceScPrefix, newShare, maxShareSizeSizeBytes)
+	return resp, file.StatusError(err)
+}
+
+func (m *MultishareController) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
+	if !m.featureMultishareBackups {
+		return nil, status.Error(codes.InvalidArgument, "CreateSnapshot is not supported for multishare backed volumes")
+	}
+	klog.Infof("CreateSnapshot called for multishare with request %+v", req)
+	name := req.GetName()
+	volumeID := req.GetSourceVolumeId()
+
+	if acquired := m.volumeLocks.TryAcquire(volumeID); !acquired {
+		return nil, status.Errorf(codes.Aborted, util.VolumeOperationAlreadyExistsFmt, volumeID)
+	}
+	defer m.volumeLocks.Release(volumeID)
+
+	if req.GetParameters() != nil {
+		if _, err := util.IsSnapshotTypeSupported(req.GetParameters()); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+	}
+	_, location, instanceName, shareName, err := parseSourceVolId(volumeID)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	project := m.cloud.Project
+
+	backupLocation := util.GetBackupLocation(req.GetParameters()) //Optional provided locaiton for cross-region backups
+	backupURI, backupRegion, err := file.CreateBackupURI(location, project, name, backupLocation)
+	if err != nil {
+		klog.Errorf("Failed to create backup URI from given name %s and location %s, error: %v", req.Name, backupLocation, err.Error())
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	existingBackup, err := m.cloud.File.GetBackup(ctx, backupURI)
+	backupExists, err := file.CheckBackupExists(existingBackup, err)
+	if err != nil {
+		return nil, file.StatusError(err)
+	}
+
+	if backupExists {
+		// process existing backup
+
+		snapshot, err := file.ProcessExistingBackup(ctx, existingBackup, volumeID, modeMultishare)
+		if err != nil {
+			return nil, err
+		}
+		return &csi.CreateSnapshotResponse{
+			Snapshot: snapshot,
+		}, nil
+	} else {
+		//no existing backup
+		backupInfo := &file.BackupInfo{
+			Name:               name,
+			SourceVolumeId:     volumeID,
+			Project:            project,
+			Location:           backupRegion,
+			SourceShare:        shareName,
+			SourceInstanceName: instanceName,
+			BackupURI:          backupURI,
+		}
+
+		labels, err := extractBackupLabels(req.GetParameters(), m.driver.config.Name, req.Name)
+		if err != nil {
+			return nil, err
+		}
+		backupInfo.Labels = labels
+		snapshot, err := m.createNewBackup(ctx, backupInfo)
+		if err != nil {
+			return nil, err
+		}
+
+		resp := &csi.CreateSnapshotResponse{
+			Snapshot: snapshot,
+		}
+		return resp, nil
+	}
+}
+
+func (m *MultishareController) createNewBackup(ctx context.Context, backupInfo *file.BackupInfo) (*csi.Snapshot, error) {
+
+	backupObj, err := m.cloud.File.CreateBackup(ctx, backupInfo)
+	if err != nil {
+		klog.Errorf("Create snapshot for volume Id %s failed: %v", backupInfo.SourceVolumeId, err.Error())
+		return nil, file.StatusError(err)
+	}
+	tp, err := util.ParseTimestamp(backupObj.CreateTime)
+	if err != nil {
+		return nil, file.StatusError(err)
+	}
+	snapshot := &csi.Snapshot{
+		SizeBytes:      util.GbToBytes(backupObj.CapacityGb),
+		SnapshotId:     backupObj.Name,
+		SourceVolumeId: backupInfo.SourceVolumeId,
+		CreationTime:   tp,
+		ReadyToUse:     true,
+	}
+
+	return snapshot, nil
 }
 
 func (m *MultishareController) getShareAndGenerateCSICreateVolumeResponse(ctx context.Context, instancePrefix string, s *file.Share, maxShareSizeSizeBytes int64) (*csi.CreateVolumeResponse, error) {
 	share, err := m.cloud.File.GetShare(ctx, s)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, err.Error())
+		return nil, err
 	}
 
 	if share.State != "READY" {
@@ -253,33 +361,31 @@ func (m *MultishareController) DeleteVolume(ctx context.Context, req *csi.Delete
 		// If share not found, proceed to instance/shrink check.
 		if file.IsNotFoundErr(err) {
 			err = m.startAndWaitForInstanceDeleteOrShrink(ctx, req.VolumeId)
-			if err != nil {
-				return nil, err
+			if err == nil { // If NO error
+				return &csi.DeleteVolumeResponse{}, nil
 			}
-			return &csi.DeleteVolumeResponse{}, nil
 		}
 
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, file.StatusError(err)
 	}
 
 	workflow, err := m.opsManager.checkAndStartShareDeleteWorkflow(ctx, share)
 	if err != nil {
-		return nil, err
+		return nil, file.StatusError(err)
 	}
 
 	// Poll for share delete to complete
 	if workflow != nil {
 		err = m.waitOnWorkflow(ctx, workflow)
 		if err != nil {
-			errCode := file.PollOpErrorCode(err)
-			return nil, status.Errorf(*errCode, "%s operation %q poll error: %v", workflow.opType.String(), workflow.opName, err)
+			return nil, file.StatusError(fmt.Errorf("%v operation %q poll error: %w", workflow.opType, workflow.opName, err))
 		}
 	}
 
 	// Check whether instance can be shrinked or deleted.
 	err = m.startAndWaitForInstanceDeleteOrShrink(ctx, req.VolumeId)
 	if err != nil {
-		return nil, err
+		return nil, file.StatusError(err)
 	}
 	return &csi.DeleteVolumeResponse{}, nil
 }
@@ -306,8 +412,7 @@ func (m *MultishareController) startAndWaitForInstanceDeleteOrShrink(ctx context
 	}
 	err = m.waitOnWorkflow(ctx, workflow)
 	if err != nil {
-		errCode := file.PollOpErrorCode(err)
-		return status.Errorf(*errCode, "%s operation %q poll error: %v", workflow.opType.String(), workflow.opName, err)
+		return fmt.Errorf("%v operation %q poll error: %w", workflow.opType, workflow.opName, err)
 	}
 	return nil
 }
@@ -327,7 +432,7 @@ func (m *MultishareController) ControllerExpandVolume(ctx context.Context, req *
 		var err error
 		maxShareSizeBytes, err = m.GetShareMaxSizeFromPV(ctx, volumeId)
 		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
+			return nil, file.StatusError(err)
 		}
 		klog.Infof("maxShareSizeBytes %d", maxShareSizeBytes)
 	}
@@ -357,11 +462,11 @@ func (m *MultishareController) ControllerExpandVolume(ctx context.Context, req *
 		},
 		Name: shareName,
 	})
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, err.Error())
-	}
 	if share == nil || file.IsNotFoundErr(err) {
-		return nil, status.Errorf(codes.Internal, "Couldn't find share with name %q", volumeId)
+		return nil, status.Errorf(codes.NotFound, "Couldn't find share with name %q", volumeId)
+	}
+	if err != nil {
+		return nil, file.StatusError(err)
 	}
 
 	if share.CapacityBytes >= reqBytes {
@@ -374,13 +479,12 @@ func (m *MultishareController) ControllerExpandVolume(ctx context.Context, req *
 
 	workflow, err := m.opsManager.checkAndStartInstanceOrShareExpandWorkflow(ctx, share, reqBytes)
 	if err != nil {
-		return nil, err
+		return nil, file.StatusError(err)
 	}
 
 	err = m.waitOnWorkflow(ctx, workflow)
 	if err != nil {
-		errCode := file.PollOpErrorCode(err)
-		return nil, status.Errorf(*errCode, "wait on %s operation %q failed with error: %v", workflow.opType.String(), workflow.opName, err)
+		return nil, file.StatusError(fmt.Errorf("wait on %v operation %q failed with error: %w", workflow.opType, workflow.opName, err))
 	}
 	klog.Infof("Wait for operation %s (type %s) completed", workflow.opName, workflow.opType.String())
 
@@ -388,27 +492,28 @@ func (m *MultishareController) ControllerExpandVolume(ctx context.Context, req *
 	case util.InstanceUpdate:
 		workflow, err = m.opsManager.startShareExpandWorkflowSafe(ctx, share, reqBytes)
 		if err != nil {
-			return nil, err
+			return nil, file.StatusError(err)
 		}
 	case util.ShareUpdate:
-		return m.getShareAndGenerateCSIControllerExpandVolumeResponse(ctx, share, reqBytes)
+		resp, err := m.getShareAndGenerateCSIControllerExpandVolumeResponse(ctx, share, reqBytes)
+		return resp, file.StatusError(err)
 	default:
 		return nil, status.Errorf(codes.Internal, "Controller Expand Volume failed, unknown workflow %v detected", workflow.opType)
 	}
 
 	err = m.waitOnWorkflow(ctx, workflow)
 	if err != nil {
-		errCode := file.PollOpErrorCode(err)
-		return nil, status.Errorf(*errCode, "wait on share expansion op %q failed with error: %v", workflow.opName, err)
+		return nil, file.StatusError(fmt.Errorf("wait on share expansion op %q failed with error: %w", workflow.opName, err))
 	}
 
-	return m.getShareAndGenerateCSIControllerExpandVolumeResponse(ctx, share, reqBytes)
+	resp, err := m.getShareAndGenerateCSIControllerExpandVolumeResponse(ctx, share, reqBytes)
+	return resp, file.StatusError(err)
 }
 
 func (m *MultishareController) getShareAndGenerateCSIControllerExpandVolumeResponse(ctx context.Context, share *file.Share, reqBytes int64) (*csi.ControllerExpandVolumeResponse, error) {
 	share, err := m.cloud.File.GetShare(ctx, share)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, err.Error())
+		return nil, err
 	}
 	if share.CapacityBytes < reqBytes {
 		return nil, status.Errorf(codes.Aborted, "expand volume operation succeeded but share capacity [%d]bytes smaller than requested [%d]bytes", share.CapacityBytes, reqBytes)
@@ -489,7 +594,7 @@ func (m *MultishareController) generateNewMultishareInstance(instanceName string
 	if m.isRegional {
 		location, err = util.GetRegionFromZone(location)
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to get region for regional cluster: %v", err.Error())
+			return nil, status.Errorf(codes.InvalidArgument, "failed to get region for regional cluster: %v", err.Error())
 		}
 	}
 	labels, err := extractInstanceLabels(req.GetParameters(), m.driver.config.Name, m.clustername, location)
@@ -517,22 +622,51 @@ func (m *MultishareController) generateNewMultishareInstance(instanceName string
 	return f, nil
 }
 
-func generateNewShare(name string, parent *file.MultishareInstance, req *csi.CreateVolumeRequest) (*file.Share, error) {
+func (m *MultishareController) checkVolumeContentSource(ctx context.Context, req *csi.CreateVolumeRequest) (string, error) {
+	if req.GetVolumeContentSource() != nil {
+		if !m.featureMultishareBackups {
+			return "", status.Error(codes.InvalidArgument, "Multishare backed volumes do not support volume content source")
+		}
+		if req.GetVolumeContentSource().GetVolume() != nil {
+			return "", status.Error(codes.InvalidArgument, "Unsupported volume content source type \"volume\"")
+		}
+
+		if req.GetVolumeContentSource().GetSnapshot() != nil {
+			id := req.GetVolumeContentSource().GetSnapshot().GetSnapshotId()
+			isBackupSource, err := util.IsBackupHandle(id)
+			if err != nil || !isBackupSource {
+				return "", status.Errorf(codes.InvalidArgument, "Unsupported volume content source %v", id)
+			}
+			_, err = m.cloud.File.GetBackup(ctx, id)
+			if err != nil {
+				klog.Errorf("Failed to get volume %v source snapshot %v: %v", req.GetName(), id, err.Error())
+				return "", file.StatusError(err)
+			}
+			return id, nil
+		}
+	}
+	return "", nil
+
+}
+func generateNewShare(name string, parent *file.MultishareInstance, req *csi.CreateVolumeRequest, sourceSnapshotId string) (*file.Share, error) {
 	if parent == nil {
-		return nil, status.Error(codes.Internal, "parent mulishare instance is empty")
+		return nil, status.Error(codes.Internal, "parent multishare instance is empty")
 	}
 	// The share size request is already validated in CreateVolume call
 	targetSizeBytes, err := getShareRequestCapacity(req.CapacityRange, util.ConfigurablePackMinShareSizeBytes, util.MaxShareSizeBytes)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	return &file.Share{
+
+	share := &file.Share{
 		Name:           name,
 		Parent:         parent,
 		CapacityBytes:  targetSizeBytes,
 		Labels:         extractShareLabels(req.Parameters),
 		MountPointName: name,
-	}, nil
+		BackupId:       sourceSnapshotId,
+	}
+	return share, nil
 }
 
 func (m *MultishareController) pickRegion(top *csi.TopologyRequirement) (string, error) {
@@ -662,6 +796,16 @@ func (m *MultishareController) generateCSICreateVolumeResponse(instancePrefix st
 			},
 		},
 	}
+	if s.BackupId != "" {
+		contentSource := &csi.VolumeContentSource{
+			Type: &csi.VolumeContentSource_Snapshot{
+				Snapshot: &csi.VolumeContentSource_SnapshotSource{
+					SnapshotId: s.BackupId,
+				},
+			},
+		}
+		resp.Volume.ContentSource = contentSource
+	}
 	if m.driver.config.FeatureOptions.FeatureLockRelease.Enabled {
 		resp.Volume.VolumeContext[attrSupportLockRelease] = "true"
 	}
@@ -718,8 +862,7 @@ func generateInstanceDescFromEcfsDesc(desc string) string {
 	return d
 }
 
-func (m *MultishareController) parseMaxVolumeSizeParam(req *csi.CreateVolumeRequest) (int, int64, error) {
-	params := req.GetParameters()
+func (m *MultishareController) parseMaxVolumeSizeParam(params map[string]string) (int, int64, error) {
 	v, ok := params[paramMaxVolumeSize]
 	if !m.featureMaxSharePerInstance && ok {
 		return 0, 0, fmt.Errorf("configurable max shares per instance feature not enabled")
@@ -780,22 +923,22 @@ func (m *MultishareController) GetShareMaxSizeFromPV(ctx context.Context, volHan
 	if targetPV == nil {
 		targetPV, err = m.findTargetPVFromKubeApiServer(ctx, volHandle)
 		if err != nil {
-			return 0, err
+			return 0, file.StatusError(err)
 		}
 	}
 
 	if targetPV == nil {
-		return 0, fmt.Errorf("target PV with volume handle %v not found, cannot determine the capacity range for the volume", volHandle)
+		return 0, status.Errorf(codes.InvalidArgument, "target PV with volume handle %v not found, cannot determine the capacity range for the volume", volHandle)
 	}
 
-	// If volume atttributes does not catpure the max share size, it must be created with the feature disabled.
+	// If volume atttributes does not capture the max share size, it must be created with the feature disabled.
 	v, ok := targetPV.Spec.CSI.VolumeAttributes[attrMaxShareSize]
 	if !ok {
 		return util.MaxShareSizeBytes, nil
 	}
 	val, err := resource.ParseQuantity(v)
 	if err != nil {
-		return 0, err
+		return 0, file.StatusError(err)
 	}
 	return val.Value(), nil
 }

@@ -24,9 +24,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/gcp-filestore-csi-driver/pkg/apis/multishare/v1beta1"
+	v1 "sigs.k8s.io/gcp-filestore-csi-driver/pkg/apis/multishare/v1"
 	clientset "sigs.k8s.io/gcp-filestore-csi-driver/pkg/client/clientset/versioned"
-	listers "sigs.k8s.io/gcp-filestore-csi-driver/pkg/client/listers/multishare/v1beta1"
+	listers "sigs.k8s.io/gcp-filestore-csi-driver/pkg/client/listers/multishare/v1"
 	cloud "sigs.k8s.io/gcp-filestore-csi-driver/pkg/cloud_provider"
 	"sigs.k8s.io/gcp-filestore-csi-driver/pkg/cloud_provider/file"
 	"sigs.k8s.io/gcp-filestore-csi-driver/pkg/util"
@@ -72,7 +72,18 @@ func (m *MultishareStatefulController) CreateVolume(ctx context.Context, req *cs
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	reqBytes, err := getShareRequestCapacity(req.GetCapacityRange(), util.MinShareSizeBytes, util.MaxShareSizeBytes)
+	_, maxShareSizeBytes, err := m.mc.parseMaxVolumeSizeParam(req.GetParameters())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	var reqBytes int64
+	if m.mc.featureMaxSharePerInstance {
+		reqBytes, err = getShareRequestCapacity(req.GetCapacityRange(), util.ConfigurablePackMinShareSizeBytes, maxShareSizeBytes)
+	} else {
+		reqBytes, err = getShareRequestCapacity(req.GetCapacityRange(), util.MinShareSizeBytes, util.MaxShareSizeBytes)
+	}
+
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -86,7 +97,7 @@ func (m *MultishareStatefulController) CreateVolume(ctx context.Context, req *cs
 			return nil, status.Errorf(codes.Internal, "error getting shareInfo %q from informer: %s", pvName, err.Error())
 		}
 		klog.Infof("querying ShareInfo %q from api server", pvName)
-		shareInfo, err = m.clientset.MultishareV1beta1().ShareInfos(util.ManagedFilestoreCSINamespace).Get(context.TODO(), pvName, metav1.GetOptions{})
+		shareInfo, err = m.clientset.MultishareV1().ShareInfos(util.ManagedFilestoreCSINamespace).Get(context.TODO(), pvName, metav1.GetOptions{})
 		if err != nil {
 			if !errors.IsNotFound(err) {
 				return nil, status.Errorf(codes.Internal, "error getting shareInfo %q from api server: %s", pvName, err.Error())
@@ -103,17 +114,18 @@ func (m *MultishareStatefulController) CreateVolume(ctx context.Context, req *cs
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
-		shareInfo = &v1beta1.ShareInfo{
+		shareInfo = &v1.ShareInfo{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       pvName,
 				Finalizers: []string{util.FilestoreResourceCleanupFinalizer},
 				Labels:     extractShareLabels(req.Parameters),
 			},
-			Spec: v1beta1.ShareInfoSpec{
+			Spec: v1.ShareInfoSpec{
 				ShareName:       util.ConvertVolToShareName(pvName),
 				CapacityBytes:   reqBytes,
 				InstancePoolTag: instanceSCLabel,
 				Region:          region,
+				Parameters:      req.GetParameters(),
 			},
 		}
 		klog.V(6).Infof("trying to create shareInfo object: %v", shareInfo)
@@ -127,7 +139,7 @@ func (m *MultishareStatefulController) CreateVolume(ctx context.Context, req *cs
 		return nil, status.Errorf(codes.Aborted, "share %s is not assigned to an instance yet", pvName)
 	}
 
-	if shareInfo.Status.ShareStatus != v1beta1.READY {
+	if shareInfo.Status.ShareStatus != v1.READY {
 		if shareInfo.Status.Error != "" {
 			return nil, status.Errorf(codes.Internal, "internal error: %s", shareInfo.Status.Error)
 		}
@@ -138,7 +150,7 @@ func (m *MultishareStatefulController) CreateVolume(ctx context.Context, req *cs
 	if err != nil {
 		return nil, err
 	}
-	return m.mc.getShareAndGenerateCSICreateVolumeResponse(ctx, instanceSCLabel, share, util.MaxShareSizeBytes)
+	return m.mc.getShareAndGenerateCSICreateVolumeResponse(ctx, instanceSCLabel, share, maxShareSizeBytes)
 }
 
 func (m *MultishareStatefulController) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
@@ -192,7 +204,7 @@ func (m *MultishareStatefulController) DeleteVolume(ctx context.Context, req *cs
 		return nil, status.Errorf(codes.Aborted, "waiting for volume %s to be deleted.", req.VolumeId)
 	}
 
-	if shareInfo.Status.ShareStatus == v1beta1.DELETED {
+	if shareInfo.Status.ShareStatus == v1.DELETED {
 		// remove finalizer and return success
 		klog.V(6).Infof("trying to remove finalizer from %s because share deleted", siName)
 		shareInfoClone := shareInfo.DeepCopy()
@@ -212,16 +224,16 @@ func (m *MultishareStatefulController) DeleteVolume(ctx context.Context, req *cs
 	return nil, status.Errorf(codes.Aborted, "waiting for the Filestore share supporting volume %s to be deleted", req.VolumeId)
 }
 
-func (m *MultishareStatefulController) updateShareInfo(ctx context.Context, shareInfoClone *v1beta1.ShareInfo) (*v1beta1.ShareInfo, error) {
-	result, err := m.clientset.MultishareV1beta1().ShareInfos(util.ManagedFilestoreCSINamespace).Update(ctx, shareInfoClone, metav1.UpdateOptions{})
+func (m *MultishareStatefulController) updateShareInfo(ctx context.Context, shareInfoClone *v1.ShareInfo) (*v1.ShareInfo, error) {
+	result, err := m.clientset.MultishareV1().ShareInfos(util.ManagedFilestoreCSINamespace).Update(ctx, shareInfoClone, metav1.UpdateOptions{})
 	if err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
-func (m *MultishareStatefulController) createShareInfo(ctx context.Context, shareInfo *v1beta1.ShareInfo) (*v1beta1.ShareInfo, error) {
-	result, err := m.clientset.MultishareV1beta1().ShareInfos(util.ManagedFilestoreCSINamespace).Create(ctx, shareInfo, metav1.CreateOptions{})
+func (m *MultishareStatefulController) createShareInfo(ctx context.Context, shareInfo *v1.ShareInfo) (*v1.ShareInfo, error) {
+	result, err := m.clientset.MultishareV1().ShareInfos(util.ManagedFilestoreCSINamespace).Create(ctx, shareInfo, metav1.CreateOptions{})
 	if err != nil {
 		return result, err
 	}
@@ -229,11 +241,25 @@ func (m *MultishareStatefulController) createShareInfo(ctx context.Context, shar
 }
 
 func (m *MultishareStatefulController) deleteShareInfo(ctx context.Context, siName string) error {
-	return m.clientset.MultishareV1beta1().ShareInfos(util.ManagedFilestoreCSINamespace).Delete(ctx, siName, metav1.DeleteOptions{})
+	return m.clientset.MultishareV1().ShareInfos(util.ManagedFilestoreCSINamespace).Delete(ctx, siName, metav1.DeleteOptions{})
 }
 
 func (m *MultishareStatefulController) ControllerExpandVolume(ctx context.Context, req *csi.ControllerExpandVolumeRequest) (*csi.ControllerExpandVolumeResponse, error) {
-	reqBytes, err := getShareRequestCapacity(req.GetCapacityRange(), util.MinShareSizeBytes, util.MaxShareSizeBytes)
+	volumeId := req.GetVolumeId()
+	if len(volumeId) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "ControllerExpandVolume volume ID must be provided")
+	}
+
+	maxShareSizeBytes := util.MaxShareSizeBytes
+	if m.mc.featureMaxSharePerInstance {
+		var err error
+		maxShareSizeBytes, err = m.mc.GetShareMaxSizeFromPV(ctx, volumeId)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		klog.Infof("maxShareSizeBytes %d", maxShareSizeBytes)
+	}
+	reqBytes, err := getShareRequestCapacity(req.GetCapacityRange(), util.ConfigurablePackMinShareSizeBytes, maxShareSizeBytes)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -273,8 +299,8 @@ func (m *MultishareStatefulController) ControllerExpandVolume(ctx context.Contex
 		return nil, status.Errorf(codes.Internal, "volume %s is not yet created", siName)
 	}
 
-	if shareInfo.Status.CapacityBytes >= reqBytes && shareInfo.Status.ShareStatus == v1beta1.READY {
-		klog.Infof("Controller expand volume succeeded for volume %v, size(bytes): %v", req.VolumeId, shareInfo.Status.CapacityBytes)
+	if shareInfo.Status.CapacityBytes >= reqBytes && shareInfo.Status.ShareStatus == v1.READY {
+		klog.Infof("Controller expand volume succeeded for volume %v, size(bytes): %v", volumeId, shareInfo.Status.CapacityBytes)
 
 		share, err := generateFileShareFromShareInfo(shareInfo)
 		if err != nil {
@@ -290,7 +316,7 @@ func (m *MultishareStatefulController) ControllerExpandVolume(ctx context.Contex
 	return nil, status.Errorf(codes.Aborted, "waiting for volume %s to be expanded", siName)
 }
 
-func generateFileShareFromShareInfo(shareInfo *v1beta1.ShareInfo) (*file.Share, error) {
+func generateFileShareFromShareInfo(shareInfo *v1.ShareInfo) (*file.Share, error) {
 	instanceUri := shareInfo.Status.InstanceHandle
 	project, location, instanceName, err := util.ParseInstanceURI(instanceUri)
 	if err != nil {

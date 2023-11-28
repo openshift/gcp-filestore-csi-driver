@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/api/googleapi"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"sigs.k8s.io/gcp-filestore-csi-driver/pkg/util"
 )
 
@@ -524,7 +525,7 @@ func TestIsContextError(t *testing.T) {
 	}
 
 	for _, test := range cases {
-		errCode := IsContextError(test.err)
+		errCode := isContextError(test.err)
 		if (test.expectedErrCode == nil) != (errCode == nil) {
 			t.Errorf("test %v failed: got %v, expected %v", test.name, errCode, test.expectedErrCode)
 		}
@@ -534,7 +535,7 @@ func TestIsContextError(t *testing.T) {
 	}
 }
 
-func TestPollOpErrorCode(t *testing.T) {
+func TestCodeForError(t *testing.T) {
 	cases := []struct {
 		name            string
 		err             error
@@ -575,15 +576,51 @@ func TestPollOpErrorCode(t *testing.T) {
 			err:             fmt.Errorf("got error: %w", &googleapi.Error{Code: http.StatusNotFound}),
 			expectedErrCode: util.ErrCodePtr(codes.NotFound),
 		},
+		{
+			name:            "status error with Aborted error code",
+			err:             status.Error(codes.Aborted, "aborted error"),
+			expectedErrCode: util.ErrCodePtr(codes.Aborted),
+		},
+		{
+			name:            "nil error",
+			err:             nil,
+			expectedErrCode: nil,
+		},
 	}
 
 	for _, test := range cases {
-		errCode := PollOpErrorCode(test.err)
+		errCode := codeForError(test.err)
 		if (test.expectedErrCode == nil) != (errCode == nil) {
 			t.Errorf("test %v failed: got %v, expected %v", test.name, errCode, test.expectedErrCode)
 		}
 		if test.expectedErrCode != nil && *errCode != *test.expectedErrCode {
 			t.Errorf("test %v failed: got %v, expected %v", test.name, errCode, test.expectedErrCode)
+		}
+	}
+}
+
+func TestStatusError(t *testing.T) {
+	cases := []struct {
+		name        string
+		err         error
+		expectedErr error
+	}{
+		{
+			name:        "404 googleapi error",
+			err:         &googleapi.Error{Code: http.StatusNotFound},
+			expectedErr: status.Error(codes.NotFound, ""),
+		},
+		{
+			name:        "nil error",
+			err:         nil,
+			expectedErr: nil,
+		},
+	}
+
+	for _, test := range cases {
+		err := StatusError(test.err)
+		if (test.expectedErr == nil) != (err == nil) {
+			t.Errorf("test %v failed: got %v, expected %v", test.name, err, test.expectedErr)
 		}
 	}
 }
@@ -624,10 +661,30 @@ func TestIsUserError(t *testing.T) {
 			err:             fmt.Errorf("got error: %w", &googleapi.Error{Code: http.StatusForbidden}),
 			expectedErrCode: util.ErrCodePtr(codes.PermissionDenied),
 		},
+		{
+			name:            "RESOURCE_EXHAUSTED error",
+			err:             fmt.Errorf("got error: RESOURCE_EXHAUSTED: Operation rate exceeded"),
+			expectedErrCode: util.ErrCodePtr(codes.ResourceExhausted),
+		},
+		{
+			name:            "INVALID_ARGUMENT error",
+			err:             fmt.Errorf("got error: INVALID_ARGUMENT"),
+			expectedErrCode: util.ErrCodePtr(codes.InvalidArgument),
+		},
+		{
+			name:            "PERMISSION_DENIED error",
+			err:             fmt.Errorf("got error: PERMISSION_DENIED"),
+			expectedErrCode: util.ErrCodePtr(codes.PermissionDenied),
+		},
+		{
+			name:            "NOT_FOUND error",
+			err:             fmt.Errorf("got error: NOT_FOUND"),
+			expectedErrCode: util.ErrCodePtr(codes.NotFound),
+		},
 	}
 
 	for _, test := range cases {
-		errCode := IsUserError(test.err)
+		errCode := isUserError(test.err)
 		if (test.expectedErrCode == nil) != (errCode == nil) {
 			t.Errorf("test %v failed: got %v, expected %v", test.name, errCode, test.expectedErrCode)
 		}

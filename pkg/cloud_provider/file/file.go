@@ -27,9 +27,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/gcp-filestore-csi-driver/pkg/util"
@@ -56,6 +58,7 @@ type Share struct {
 	MountPointName string
 	Labels         map[string]string
 	CapacityBytes  int64
+	BackupId       string
 }
 
 type MultishareInstance struct {
@@ -108,10 +111,38 @@ type Network struct {
 	Ip              string
 }
 
-type BackupInfo struct {
+type Backup struct {
 	Backup         *filev1beta1.Backup
 	SourceInstance string
 	SourceShare    string
+}
+
+type BackupInfo struct {
+	Name               string
+	SourceVolumeId     string
+	BackupURI          string
+	SourceInstance     string
+	SourceInstanceName string
+	SourceShare        string
+	Project            string
+	Location           string
+	Tier               string
+	Labels             map[string]string
+}
+
+func (bi *BackupInfo) SourceVolumeLocation() string {
+	splitId := strings.Split(bi.SourceVolumeId, "/")
+	// Format: "modeInstance/us-central1/myinstance/myshare",
+
+	return splitId[1]
+}
+
+func (bi *BackupInfo) BackupSource() string {
+	if isMultishareVolId(bi.SourceVolumeId) {
+		return shareURI(bi.Project, bi.SourceVolumeLocation(), bi.SourceInstanceName, bi.SourceShare)
+	} else {
+		return instanceURI(bi.Project, bi.SourceVolumeLocation(), bi.SourceInstanceName)
+	}
 }
 
 type Service interface {
@@ -120,8 +151,8 @@ type Service interface {
 	GetInstance(ctx context.Context, obj *ServiceInstance) (*ServiceInstance, error)
 	ListInstances(ctx context.Context, obj *ServiceInstance) ([]*ServiceInstance, error)
 	ResizeInstance(ctx context.Context, obj *ServiceInstance) (*ServiceInstance, error)
-	GetBackup(ctx context.Context, backupUri string) (*BackupInfo, error)
-	CreateBackup(ctx context.Context, obj *ServiceInstance, backupId, backupLocation string) (*filev1beta1.Backup, error)
+	GetBackup(ctx context.Context, backupUri string) (*Backup, error)
+	CreateBackup(ctx context.Context, backupInfo *BackupInfo) (*filev1beta1.Backup, error)
 	DeleteBackup(ctx context.Context, backupId string) error
 	CreateInstanceFromBackupSource(ctx context.Context, obj *ServiceInstance, volumeSourceSnapshotId string) (*ServiceInstance, error)
 	HasOperations(ctx context.Context, obj *ServiceInstance, operationType string, done bool) (bool, error)
@@ -503,51 +534,47 @@ func (manager *gcfsServiceManager) ResizeInstance(ctx context.Context, obj *Serv
 	return instance, nil
 }
 
-func (manager *gcfsServiceManager) GetBackup(ctx context.Context, backupUri string) (*BackupInfo, error) {
+func (manager *gcfsServiceManager) GetBackup(ctx context.Context, backupUri string) (*Backup, error) {
 	backup, err := manager.backupService.Get(backupUri).Context(ctx).Do()
 	if err != nil {
 		return nil, err
 	}
-	return &BackupInfo{
+	return &Backup{
 		Backup:         backup,
 		SourceInstance: backup.SourceInstance,
 		SourceShare:    backup.SourceFileShare,
 	}, nil
 }
 
-func (manager *gcfsServiceManager) CreateBackup(ctx context.Context, obj *ServiceInstance, backupName string, backupLocation string) (*filev1beta1.Backup, error) {
-	backupUri, region, err := CreateBackupURI(obj, backupName, backupLocation)
-	if err != nil {
-		return nil, err
-	}
+func (manager *gcfsServiceManager) CreateBackup(ctx context.Context, backupInfo *BackupInfo) (*filev1beta1.Backup, error) {
 
-	backupSource := fmt.Sprintf("projects/%s/locations/%s/instances/%s", obj.Project, obj.Location, obj.Name)
 	backupobj := &filev1beta1.Backup{
-		SourceInstance:  backupSource,
-		SourceFileShare: obj.Volume.Name,
+		SourceInstance:  backupInfo.BackupSource(),
+		SourceFileShare: backupInfo.SourceShare,
+		Labels:          backupInfo.Labels,
 	}
-	klog.V(4).Infof("Creating backup object %+v for the URI %v", *backupobj, backupUri)
-	opbackup, err := manager.backupService.Create(locationURI(obj.Project, region), backupobj).BackupId(backupName).Context(ctx).Do()
+	klog.V(4).Infof("Creating backup object %+v for the URI %v", *backupobj, backupInfo.BackupURI)
+	opbackup, err := manager.backupService.Create(locationURI(backupInfo.Project, backupInfo.Location), backupobj).BackupId(backupInfo.Name).Context(ctx).Do()
 
 	if err != nil {
 		klog.Errorf("Create Backup operation failed: %w", err)
 		return nil, err
 	}
 
-	klog.V(4).Infof("For backup uri %s, waiting for backup op %v to complete", backupUri, opbackup.Name)
+	klog.V(4).Infof("For backup uri %s, waiting for backup op %v to complete", backupInfo.BackupURI, opbackup.Name)
 	err = manager.waitForOp(ctx, opbackup)
 	if err != nil {
-		return nil, fmt.Errorf("WaitFor CreateBackup op %s for source instance %v, backup uri: %v, operation failed: %w", opbackup.Name, backupSource, backupUri, err)
+		return nil, fmt.Errorf("WaitFor CreateBackup op %s for source instance %v, backup uri: %v, operation failed: %w", opbackup.Name, backupInfo.BackupSource(), backupInfo.BackupURI, err)
 	}
 
-	backupObj, err := manager.backupService.Get(backupUri).Context(ctx).Do()
+	backupObj, err := manager.backupService.Get(backupInfo.BackupURI).Context(ctx).Do()
 	if err != nil {
 		return nil, err
 	}
 	if backupObj.State != "READY" {
-		return nil, fmt.Errorf("backup %v for source %v is not ready, current state: %v", backupUri, backupSource, backupObj.State)
+		return nil, fmt.Errorf("backup %v for source %v is not ready, current state: %v", backupInfo.BackupURI, backupInfo.BackupSource(), backupObj.State)
 	}
-	klog.Infof("Successfully created backup %+v for source instance %v", backupObj, backupSource)
+	klog.Infof("Successfully created backup %+v for source instance %v", backupObj, backupInfo.BackupSource())
 	return backupObj, nil
 }
 
@@ -623,8 +650,8 @@ func GetInstanceNameFromURI(uri string) (project, location, name string, err err
 }
 
 func IsNotFoundErr(err error) bool {
-	apiErr, ok := err.(*googleapi.Error)
-	if !ok {
+	var apiErr *googleapi.Error
+	if !errors.As(err, &apiErr) {
 		return false
 	}
 
@@ -636,7 +663,7 @@ func IsNotFoundErr(err error) bool {
 	return false
 }
 
-// IsUserError returns a pointer to the grpc error code that maps to the http
+// isUserError returns a pointer to the grpc error code that maps to the http
 // error code for the passed in user googleapi error. Returns nil if the
 // given error is not a googleapi error caused by the user. The following
 // http error codes are considered user errors:
@@ -644,11 +671,12 @@ func IsNotFoundErr(err error) bool {
 // (2) http 403 Forbidden, returns grpc PermissionDenied,
 // (3) http 404 Not Found, returns grpc NotFound
 // (4) http 429 Too Many Requests, returns grpc ResourceExhausted
-func IsUserError(err error) *codes.Code {
+func isUserError(err error) *codes.Code {
 	// Upwrap the error
 	var apiErr *googleapi.Error
 	if !errors.As(err, &apiErr) {
-		return nil
+		// Fallback to check for expected error code in the error string
+		return containsUserErrStr(err)
 	}
 
 	userErrors := map[int]codes.Code{
@@ -663,10 +691,31 @@ func IsUserError(err error) *codes.Code {
 	return nil
 }
 
-// IsContextError returns a pointer to the grpc error code DeadlineExceeded
+func containsUserErrStr(err error) *codes.Code {
+	if err == nil {
+		return nil
+	}
+
+	// Error string picked up from https://cloud.google.com/apis/design/errors#handling_errors
+	if strings.Contains(err.Error(), "PERMISSION_DENIED") {
+		return util.ErrCodePtr(codes.PermissionDenied)
+	}
+	if strings.Contains(err.Error(), "RESOURCE_EXHAUSTED") {
+		return util.ErrCodePtr(codes.ResourceExhausted)
+	}
+	if strings.Contains(err.Error(), "INVALID_ARGUMENT") {
+		return util.ErrCodePtr(codes.InvalidArgument)
+	}
+	if strings.Contains(err.Error(), "NOT_FOUND") {
+		return util.ErrCodePtr(codes.NotFound)
+	}
+	return nil
+}
+
+// isContextError returns a pointer to the grpc error code DeadlineExceeded
 // if the passed in error contains the "context deadline exceeded" string and returns
 // the grpc error code Canceled if the error contains the "context canceled" string.
-func IsContextError(err error) *codes.Code {
+func isContextError(err error) *codes.Code {
 	if err == nil {
 		return nil
 	}
@@ -681,23 +730,103 @@ func IsContextError(err error) *codes.Code {
 	return nil
 }
 
-// PollOpErrorCode returns a pointer to the grpc error code that maps to the http
-// error code for passed in googleapi error. Returns grpc DeadlineExceeded if the
-// given error contains the "context deadline exceeded" string. Returns the grpc Internal error
-// code if the passed in error is neither a user error or a deadline exceeded error.
-func PollOpErrorCode(err error) *codes.Code {
-	if errCode := IsUserError(err); errCode != nil {
+// existingErrorCode returns a pointer to the grpc error code for the passed in error.
+// Returns nil if the error is nil, or if the error cannot be converted to a grpc status.
+func existingErrorCode(err error) *codes.Code {
+	if err == nil {
+		return nil
+	}
+
+	if status, ok := status.FromError(err); ok {
+		return util.ErrCodePtr(status.Code())
+	}
+	return nil
+}
+
+// codeForError returns a pointer to the grpc error code that maps to the http
+// error code for the passed in user googleapi error or context error. Returns
+// codes.Internal if the given error is not a googleapi error caused by the user.
+// The following http error codes are considered user errors:
+// (1) http 400 Bad Request, returns grpc InvalidArgument,
+// (2) http 403 Forbidden, returns grpc PermissionDenied,
+// (3) http 404 Not Found, returns grpc NotFound
+// (4) http 429 Too Many Requests, returns grpc ResourceExhausted
+// The following errors are considered context errors:
+// (1) "context deadline exceeded", returns grpc DeadlineExceeded,
+// (2) "context canceled", returns grpc Canceled
+func codeForError(err error) *codes.Code {
+	if err == nil {
+		return nil
+	}
+	if errCode := existingErrorCode(err); errCode != nil {
 		return errCode
 	}
-	if errCode := IsContextError(err); errCode != nil {
+	if errCode := isUserError(err); errCode != nil {
 		return errCode
 	}
+	if errCode := isContextError(err); errCode != nil {
+		return errCode
+	}
+
 	return util.ErrCodePtr(codes.Internal)
 }
 
+// Status error returns the error as a grpc status error, and
+// sets the grpc error code according to CodeForError.
+func StatusError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return status.Error(*codeForError(err), err.Error())
+}
+
+// This function will process an existing backup
+func ProcessExistingBackup(ctx context.Context, backup *Backup, volumeID string, mode string) (*csi.Snapshot, error) {
+	backupSourceCSIHandle, err := util.BackupVolumeSourceToCSIVolumeHandle(mode, backup.SourceInstance, backup.SourceShare)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "Cannot determine volume handle from back source instance %s, share %s", backup.SourceInstance, backup.SourceShare)
+	}
+	if backupSourceCSIHandle != volumeID {
+		return nil, status.Errorf(codes.AlreadyExists, "Backup already exists with a different source volume %s, input source volume %s", backupSourceCSIHandle, volumeID)
+	}
+	// Check if backup is in the process of getting created.
+	if backup.Backup.State == "CREATING" || backup.Backup.State == "FINALIZING" {
+		return nil, status.Errorf(codes.DeadlineExceeded, "Backup %v not yet ready, current state %s", backup.Backup.Name, backup.Backup.State)
+	}
+	if backup.Backup.State != "READY" {
+		return nil, status.Errorf(codes.Internal, "Backup %v not yet ready, current state %s", backup.Backup.Name, backup.Backup.State)
+	}
+	tp, err := util.ParseTimestamp(backup.Backup.CreateTime)
+	if err != nil {
+		err = fmt.Errorf("failed to parse create timestamp for backup %v: %w", backup.Backup.Name, err)
+		return nil, StatusError(err)
+	}
+	klog.V(4).Infof("CreateSnapshot success for volume %v, Backup Id: %v", volumeID, backup.Backup.Name)
+	return &csi.Snapshot{
+		SizeBytes:      util.GbToBytes(backup.Backup.CapacityGb),
+		SnapshotId:     backup.Backup.Name,
+		SourceVolumeId: volumeID,
+		CreationTime:   tp,
+		ReadyToUse:     true,
+	}, nil
+}
+
+func CheckBackupExists(backupInfo *Backup, err error) (bool, error) {
+	if err != nil {
+		if !IsNotFoundErr(err) {
+			return false, StatusError(err)
+		} else {
+			//no backup exists
+			return false, nil
+		}
+	}
+	//process existing backup
+	return true, nil
+}
+
 // This function returns the backup URI, the region that was picked to be the backup resource location and error.
-func CreateBackupURI(obj *ServiceInstance, backupName, backupLocation string) (string, string, error) {
-	region, err := deduceRegion(obj, backupLocation)
+func CreateBackupURI(serviceLocation, project, backupName, backupLocation string) (string, string, error) {
+	region, err := deduceRegion(serviceLocation, backupLocation)
 	if err != nil {
 		return "", "", err
 	}
@@ -705,19 +834,19 @@ func CreateBackupURI(obj *ServiceInstance, backupName, backupLocation string) (s
 	if !hasRegionPattern(region) {
 		return "", "", fmt.Errorf("provided location did not match region pattern: %s", backupLocation)
 	}
-	return backupURI(obj.Project, region, backupName), region, nil
+	return backupURI(project, region, backupName), region, nil
 }
 
 // deduceRegion will either return the provided backupLocation region or deduce
 // from the ServiceInstance
-func deduceRegion(obj *ServiceInstance, backupLocation string) (string, error) {
+func deduceRegion(serviceLocation, backupLocation string) (string, error) {
 	region := backupLocation
 	if region == "" {
-		if hasRegionPattern(obj.Location) {
-			region = obj.Location
+		if hasRegionPattern(serviceLocation) {
+			region = serviceLocation
 		} else {
 			var err error
-			region, err = util.GetRegionFromZone(obj.Location)
+			region, err = util.GetRegionFromZone(serviceLocation)
 			if err != nil {
 				return "", err
 			}
@@ -880,6 +1009,7 @@ func (manager *gcfsServiceManager) StartCreateShareOp(ctx context.Context, share
 		CapacityGb: util.BytesToGb(share.CapacityBytes),
 		Labels:     share.Labels,
 		MountName:  share.MountPointName,
+		Backup:     share.BackupId,
 	}
 
 	op, err := manager.multishareInstancesSharesService.Create(instanceuri, targetshare).ShareId(share.Name).Context(ctx).Do()
@@ -1191,4 +1321,8 @@ func GenerateShareURI(s *Share) (string, error) {
 	}
 
 	return shareURI(s.Parent.Project, s.Parent.Location, s.Parent.Name, s.Name), nil
+}
+
+func isMultishareVolId(volId string) bool {
+	return strings.Contains(volId, "modeMultishare")
 }
