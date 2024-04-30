@@ -62,6 +62,7 @@ func initTestController(t *testing.T) csi.ControllerServer {
 		cloud:       cloudProvider,
 		volumeLocks: util.NewVolumeLocks(),
 		features:    &GCFSDriverFeatureOptions{FeatureLockRelease: &FeatureLockRelease{}},
+		tagManager:  cloud.NewFakeTagManager(),
 	})
 }
 
@@ -81,6 +82,7 @@ func initBlockingTestController(t *testing.T, operationUnblocker chan chan struc
 		cloud:       cloudProvider,
 		volumeLocks: util.NewVolumeLocks(),
 		features:    &GCFSDriverFeatureOptions{FeatureLockRelease: &FeatureLockRelease{}},
+		tagManager:  cloud.NewFakeTagManager(),
 	})
 }
 
@@ -104,13 +106,21 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 			},
 		},
 	}
+	features := &GCFSDriverFeatureOptions{
+		FeatureNFSExportOptionsOnCreate: &FeatureNFSExportOptionsOnCreate{
+			Enabled: true,
+		},
+		FeatureLockRelease: &FeatureLockRelease{},
+	}
 
 	cases := []struct {
-		name          string
-		req           *csi.CreateVolumeRequest
-		resp          *csi.CreateVolumeResponse
-		initialBackup *BackupInfo
-		expectErr     bool
+		name            string
+		req             *csi.CreateVolumeRequest
+		resp            *csi.CreateVolumeResponse
+		initialBackup   *BackupInfo
+		expectedOptions []*file.NfsExportOptions
+		expectErr       bool
+		features        *GCFSDriverFeatureOptions
 	}{
 		{
 			name: "from default tier snapshot",
@@ -123,7 +133,10 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 						},
 					},
 				},
-				Parameters:         map[string]string{"tier": defaultTier},
+				Parameters: map[string]string{
+					"tier":             defaultTier,
+					ParameterKeyLabels: "key1=value1",
+				},
 				VolumeCapabilities: volumeCapabilities,
 			},
 			resp: &csi.CreateVolumeResponse{
@@ -253,10 +266,127 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 				SourceVolumeId: modeInstance + "/" + testRegion + "/" + instanceName + "/" + shareName,
 			},
 		},
+		{
+			name: "from enterprise tier snapshot and nfsExportOptions set",
+			req: &csi.CreateVolumeRequest{
+				Name: testCSIVolume,
+				VolumeContentSource: &csi.VolumeContentSource{
+					Type: &csi.VolumeContentSource_Snapshot{
+						Snapshot: &csi.VolumeContentSource_SnapshotSource{
+							SnapshotId: "projects/test-project/locations/us-central1/backups/mybackup",
+						},
+					},
+				},
+				Parameters: map[string]string{
+					"tier": enterpriseTier,
+					ParamNfsExportOptions: `[
+						{
+							"accessMode": "READ_WRITE",
+							"ipRanges": [
+								"10.0.0.0/24"
+							],
+							"squashMode": "ROOT_SQUASH",
+							"anonUid": "1003",
+							"anonGid": "1003"
+						},
+						{
+							"accessMode": "READ_ONLY",
+							"ipRanges": [
+								"10.0.0.0/28"
+							],
+							"squashMode": "NO_ROOT_SQUASH"
+						}
+					]`,
+				},
+				VolumeCapabilities: volumeCapabilities,
+			},
+			features: features,
+			resp: &csi.CreateVolumeResponse{
+				Volume: &csi.Volume{
+					CapacityBytes: testBytes,
+					VolumeId:      testVolumeID,
+					VolumeContext: map[string]string{
+						attrIP:     testIP,
+						attrVolume: newInstanceVolume,
+					},
+					ContentSource: &csi.VolumeContentSource{
+						Type: &csi.VolumeContentSource_Snapshot{
+							Snapshot: &csi.VolumeContentSource_SnapshotSource{
+								SnapshotId: "projects/test-project/locations/us-central1/backups/mybackup",
+							},
+						},
+					},
+				},
+			},
+			expectedOptions: []*file.NfsExportOptions{
+				{
+					AccessMode: "READ_WRITE",
+					IpRanges:   []string{"10.0.0.0/24"},
+					SquashMode: "ROOT_SQUASH",
+					AnonGid:    1003,
+					AnonUid:    1003,
+				},
+				{
+					AccessMode: "READ_ONLY",
+					IpRanges:   []string{"10.0.0.0/28"},
+					SquashMode: "NO_ROOT_SQUASH",
+				},
+			},
+			initialBackup: &BackupInfo{
+				s: &file.ServiceInstance{
+					Project:  testProject,
+					Location: testRegion,
+					Name:     instanceName,
+					Tier:     enterpriseTier,
+					Volume: file.Volume{
+						Name:      shareName,
+						SizeBytes: testBytes,
+					},
+				},
+				backupName:     backupName,
+				backupLocation: testRegion,
+				SourceVolumeId: modeInstance + "/" + testRegion + "/" + instanceName + "/" + shareName,
+			},
+		},
+		{
+			name: "Parameters contain misconfigured labels(invalid KV separator(:) used)",
+			req: &csi.CreateVolumeRequest{
+				Name: testCSIVolume,
+				Parameters: map[string]string{
+					"tier":             enterpriseTier,
+					ParameterKeyLabels: "key1:value1",
+				},
+			},
+			resp:            nil,
+			expectedOptions: nil,
+			initialBackup: &BackupInfo{
+				s: &file.ServiceInstance{
+					Project:  testProject,
+					Location: testRegion,
+					Name:     instanceName,
+					Tier:     enterpriseTier,
+					Volume: file.Volume{
+						Name:      shareName,
+						SizeBytes: testBytes,
+					},
+				},
+				backupName:     backupName,
+				backupLocation: testRegion,
+				SourceVolumeId: modeInstance + "/" + testRegion + "/" + instanceName + "/" + shareName,
+			},
+			expectErr: true,
+		},
 	}
 
 	for _, test := range cases {
 		cs := initTestController(t).(*controllerServer)
+		if test.features != nil {
+			cs.config.features = test.features
+		}
+
+		cs.config.tagManager.(*cloud.FakeTagServiceManager).
+			On("AttachResourceTags", context.TODO(), cloud.FilestoreInstance, testCSIVolume, testLocation, test.req.GetName(), test.req.GetParameters()).
+			Return(nil)
 
 		//Create initial backup
 		backupInfo := &file.BackupInfo{
@@ -266,8 +396,10 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 			SourceShare:        test.initialBackup.s.Volume.Name,
 			Name:               test.initialBackup.backupName,
 			SourceVolumeId:     test.initialBackup.SourceVolumeId,
-			BackupURI:          test.resp.Volume.ContentSource.GetSnapshot().SnapshotId,
 			Labels:             make(map[string]string),
+		}
+		if test.resp != nil {
+			backupInfo.BackupURI = test.resp.Volume.ContentSource.GetSnapshot().SnapshotId
 		}
 
 		cs.config.fileService.CreateBackup(context.TODO(), backupInfo)
@@ -280,6 +412,18 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 		if test.expectErr && err == nil {
 			t.Errorf("test %q failed; got success", test.name)
 		}
+		if !test.expectErr && test.req.Parameters[ParamNfsExportOptions] != "" {
+			instance, err := cs.config.fileService.GetInstance(context.TODO(), &file.ServiceInstance{Name: test.req.Name})
+			if err != nil {
+				t.Errorf("test %q failed: couldn't get instance %v: %v", test.name, resp.Volume.VolumeId, err)
+				return
+			}
+			for i := range test.expectedOptions {
+				if !reflect.DeepEqual(instance.NfsExportOptions[i], test.expectedOptions[i]) {
+					t.Errorf("test %q failed; nfs export options not equal at index %d: got %+v, expected %+v", test.name, i, instance.NfsExportOptions[i], test.expectedOptions[i])
+				}
+			}
+		}
 		if !reflect.DeepEqual(resp, test.resp) {
 			t.Errorf("test %q failed: got resp %+v, expected %+v", test.name, resp, test.resp)
 		}
@@ -287,11 +431,19 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 }
 
 func TestCreateVolume(t *testing.T) {
+	features := &GCFSDriverFeatureOptions{
+		FeatureNFSExportOptionsOnCreate: &FeatureNFSExportOptionsOnCreate{
+			Enabled: true,
+		},
+		FeatureLockRelease: &FeatureLockRelease{},
+	}
 	cases := []struct {
-		name      string
-		req       *csi.CreateVolumeRequest
-		resp      *csi.CreateVolumeResponse
-		expectErr bool
+		name            string
+		req             *csi.CreateVolumeRequest
+		resp            *csi.CreateVolumeResponse
+		expectErr       bool
+		features        *GCFSDriverFeatureOptions
+		expectedOptions []*file.NfsExportOptions
 	}{
 		{
 			name: "valid defaults",
@@ -318,7 +470,9 @@ func TestCreateVolume(t *testing.T) {
 					},
 				},
 			},
+			features: features,
 		},
+		// Failure Scenarios
 		{
 			name: "name empty",
 			req: &csi.CreateVolumeRequest{
@@ -369,15 +523,158 @@ func TestCreateVolume(t *testing.T) {
 			},
 			expectErr: true,
 		},
+		{
+			name: "adding tags to filestore instance fails(failure scenario mocked)",
+			req: &csi.CreateVolumeRequest{
+				Name: testCSIVolume2,
+				VolumeCapabilities: []*csi.VolumeCapability{
+					{
+						AccessType: &csi.VolumeCapability_Mount{
+							Mount: &csi.VolumeCapability_MountVolume{},
+						},
+						AccessMode: &csi.VolumeCapability_AccessMode{
+							Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+						},
+					},
+				},
+				Parameters: map[string]string{
+					"network":                      "test",
+					cloud.ParameterKeyResourceTags: "kubernetes/test1/test1",
+				},
+			},
+			expectErr: true,
+		},
 		// TODO: create failed
 		// TODO: instance already exists error
 		// TODO: instance already exists invalid
 		// TODO: instance already exists valid
+		{
+			name: "nfsExportOptions feature is disabled",
+			req: &csi.CreateVolumeRequest{
+				Name: testCSIVolume,
+				VolumeContentSource: &csi.VolumeContentSource{
+					Type: &csi.VolumeContentSource_Snapshot{
+						Snapshot: &csi.VolumeContentSource_SnapshotSource{
+							SnapshotId: "projects/test-project/locations/us-central1/backups/mybackup",
+						},
+					},
+				},
+				Parameters: map[string]string{
+					"tier": enterpriseTier,
+					ParamNfsExportOptions: `[
+						{
+							"accessMode": "READ_WRITE",
+							"ipRanges": [
+								"10.0.0.0/24"
+							],
+							"squashMode": "ROOT_SQUASH",
+							"anonUid": "1003",
+							"anonGid": "1003"
+						},
+						{
+							"accessMode": "READ_ONLY",
+							"ipRanges": [
+								"10.0.0.0/28"
+							],
+							"squashMode": "NO_ROOT_SQUASH"
+						}
+					]`,
+				},
+				VolumeCapabilities: []*csi.VolumeCapability{
+					{
+						AccessType: &csi.VolumeCapability_Mount{
+							Mount: &csi.VolumeCapability_MountVolume{},
+						},
+						AccessMode: &csi.VolumeCapability_AccessMode{
+							Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+						},
+					},
+				},
+			},
+			features: &GCFSDriverFeatureOptions{
+				FeatureNFSExportOptionsOnCreate: &FeatureNFSExportOptionsOnCreate{
+					Enabled: false,
+				},
+				FeatureLockRelease: &FeatureLockRelease{},
+			},
+			expectErr: true,
+		},
+		// Success Scenarios
+		{
+			name: "adding nfs-export-options",
+			req: &csi.CreateVolumeRequest{
+				Name: testCSIVolume,
+				Parameters: map[string]string{
+					ParamNfsExportOptions: `[
+						{
+							"accessMode": "READ_WRITE",
+							"ipRanges": [
+								"10.0.0.0/24"
+							],
+							"squashMode": "ROOT_SQUASH",
+							"anonUid": "1003",
+							"anonGid": "1003"
+						},
+						{
+							"accessMode": "READ_ONLY",
+							"ipRanges": [
+								"10.0.0.0/28"
+							],
+							"squashMode": "NO_ROOT_SQUASH"
+						}
+					]`,
+				},
+				VolumeCapabilities: []*csi.VolumeCapability{
+					{
+						AccessType: &csi.VolumeCapability_Mount{
+							Mount: &csi.VolumeCapability_MountVolume{},
+						},
+						AccessMode: &csi.VolumeCapability_AccessMode{
+							Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+						},
+					},
+				},
+			},
+			features: features,
+			expectedOptions: []*file.NfsExportOptions{
+				{
+					AccessMode: "READ_WRITE",
+					IpRanges:   []string{"10.0.0.0/24"},
+					SquashMode: "ROOT_SQUASH",
+					AnonGid:    1003,
+					AnonUid:    1003,
+				},
+				{
+					AccessMode: "READ_ONLY",
+					IpRanges:   []string{"10.0.0.0/28"},
+					SquashMode: "NO_ROOT_SQUASH",
+				},
+			},
+			resp: &csi.CreateVolumeResponse{
+				Volume: &csi.Volume{
+					CapacityBytes: 1 * util.Tb,
+					VolumeId:      testVolumeID,
+					VolumeContext: map[string]string{
+						attrIP:     testIP,
+						attrVolume: newInstanceVolume,
+					},
+				},
+			},
+		},
 	}
 
 	for _, test := range cases {
-		cs := initTestController(t)
+		cs := initTestController(t).(*controllerServer)
+		cs.config.features = test.features
+		cs.config.tagManager.(*cloud.FakeTagServiceManager).
+			On("AttachResourceTags", context.TODO(), cloud.FilestoreInstance, testCSIVolume, testLocation, test.req.GetName(), test.req.GetParameters()).
+			Return(nil)
+		cs.config.tagManager.(*cloud.FakeTagServiceManager).
+			On("AttachResourceTags", context.TODO(), cloud.FilestoreInstance, testCSIVolume2, testLocation, test.req.GetName(), test.req.GetParameters()).
+			Return(fmt.Errorf("mock failure: error while adding tags to filestore instance"))
+
 		resp, err := cs.CreateVolume(context.TODO(), test.req)
+
 		if !test.expectErr && err != nil {
 			t.Errorf("test %q failed: %v", test.name, err)
 		}
@@ -386,6 +683,19 @@ func TestCreateVolume(t *testing.T) {
 		}
 		if !reflect.DeepEqual(resp, test.resp) {
 			t.Errorf("test %q failed: got resp %+v, expected %+v", test.name, resp, test.resp)
+		}
+
+		if !test.expectErr && test.req.Parameters[ParamNfsExportOptions] != "" {
+			instance, err := cs.config.fileService.GetInstance(context.TODO(), &file.ServiceInstance{Name: test.req.Name})
+			if err != nil {
+				t.Errorf("test %q failed: couldn't get instance %v: %v", test.name, test.req.Name, err)
+				return
+			}
+			for i := range test.expectedOptions {
+				if !reflect.DeepEqual(instance.NfsExportOptions[i], test.expectedOptions[i]) {
+					t.Errorf("test %q failed; nfs export options not equal at index %d: got %+v, expected %+v", test.name, i, instance.NfsExportOptions[i], test.expectedOptions[i])
+				}
+			}
 		}
 	}
 }
@@ -1149,7 +1459,13 @@ type RequestConfig struct {
 func TestVolumeOperationLocks(t *testing.T) {
 	// A channel of size 1 is sufficient, because the caller of runRequest() in below steps immediately blocks and retrieves the channel of empty struct from 'operationUnblocker' channel. The test steps are such that, atmost one function pushes items on the 'operationUnblocker' channel, to indicate that the function is blocked and waiting for a signal to proceed futher in the execution.
 	operationUnblocker := make(chan chan struct{}, 1)
-	cs := initBlockingTestController(t, operationUnblocker)
+	cs := initBlockingTestController(t, operationUnblocker).(*controllerServer)
+	cs.config.tagManager.(*cloud.FakeTagServiceManager).
+		On("AttachResourceTags", context.Background(), cloud.FilestoreInstance, testCSIVolume, testLocation, testCSIVolume, map[string]string(nil)).
+		Return(nil)
+	cs.config.tagManager.(*cloud.FakeTagServiceManager).
+		On("AttachResourceTags", context.Background(), cloud.FilestoreInstance, testCSIVolume2, testLocation, testCSIVolume2, map[string]string(nil)).
+		Return(nil)
 	runRequest := func(req *RequestConfig) <-chan error {
 		resp := make(chan error)
 		go func() {
@@ -1275,6 +1591,7 @@ func TestCreateSnapshot(t *testing.T) {
 		state  string
 	}
 	backupName := "mybackup"
+	backupName2 := "mybackup2"
 	project := "test-project"
 	zone := "us-central1-c"
 	region := "us-central1"
@@ -1318,6 +1635,30 @@ func TestCreateSnapshot(t *testing.T) {
 				Name:           backupName,
 				Parameters: map[string]string{
 					util.VolumeSnapshotTypeKey: "backup",
+				},
+			},
+			initialBackup: &BackupTestInfo{
+				backup: &file.BackupInfo{
+					Project:            project,
+					Location:           region,
+					SourceInstanceName: instanceName,
+					SourceShare:        shareName,
+					Name:               backupName,
+					BackupURI:          defaultBackupUri,
+					SourceVolumeId:     "modeInstance/us-central1/myinstance/myshare",
+				},
+				state: "CREATING",
+			},
+			expectErr: true,
+		},
+		{
+			name: "Parameters contain misconfigured labels(invalid KV separator(:) used)",
+			req: &csi.CreateSnapshotRequest{
+				SourceVolumeId: "modeInstance/us-central1/myinstance/myshare",
+				Name:           backupName,
+				Parameters: map[string]string{
+					util.VolumeSnapshotTypeKey: "backup",
+					ParameterKeyLabels:         "key1:value1",
 				},
 			},
 			initialBackup: &BackupTestInfo{
@@ -1435,6 +1776,43 @@ func TestCreateSnapshot(t *testing.T) {
 				},
 			},
 		},
+		{
+			// If the incorrect labels were added, labels processing will not happen for already
+			// existing backup resources.
+			name: "Existing backup found, in state READY. Labels will not be processed.",
+			req: &csi.CreateSnapshotRequest{
+				SourceVolumeId: "modeInstance/us-central1-c/myinstance/myshare",
+				Name:           backupName,
+				Parameters: map[string]string{
+					util.VolumeSnapshotTypeKey: "backup",
+					ParameterKeyLabels:         "key1:value1",
+				},
+			},
+			initialBackup: &BackupTestInfo{
+				backup: &file.BackupInfo{
+					Project:            project,
+					Location:           region,
+					SourceInstanceName: instanceName,
+					SourceShare:        shareName,
+					Name:               backupName,
+					BackupURI:          defaultBackupUri,
+					SourceVolumeId:     "modeInstance/us-central1-c/myinstance/myshare",
+				},
+			},
+		},
+		{
+			name: "adding tags to filestore backup fails(failure scenario mocked)",
+			req: &csi.CreateSnapshotRequest{
+				SourceVolumeId: "modeInstance/us-central1/myinstance/myshare",
+				Name:           backupName2,
+				Parameters: map[string]string{
+					util.VolumeSnapshotTypeKey:     "backup",
+					cloud.ParameterKeyResourceTags: "kubernetes/test1/test1",
+				},
+			},
+			initialBackup: nil,
+			expectErr:     true,
+		},
 	}
 	for _, test := range cases {
 		fileService, err := file.NewFakeService()
@@ -1451,7 +1829,18 @@ func TestCreateSnapshot(t *testing.T) {
 			fileService: fileService,
 			cloud:       cloudProvider,
 			volumeLocks: util.NewVolumeLocks(),
-		})
+			tagManager:  cloud.NewFakeTagManager(),
+		}).(*controllerServer)
+
+		cs.config.tagManager.(*cloud.FakeTagServiceManager).
+			On("AttachResourceTags", context.TODO(), cloud.FilestoreBackUp, backupName, region, test.req.GetName(), test.req.GetParameters()).
+			Return(nil)
+		cs.config.tagManager.(*cloud.FakeTagServiceManager).
+			On("AttachResourceTags", context.TODO(), cloud.FilestoreBackUp, backupName, "us-west1", test.req.GetName(), test.req.GetParameters()).
+			Return(nil)
+		cs.config.tagManager.(*cloud.FakeTagServiceManager).
+			On("AttachResourceTags", context.TODO(), cloud.FilestoreBackUp, backupName2, region, test.req.GetName(), test.req.GetParameters()).
+			Return(fmt.Errorf("mock failure: error while adding tags to filestore backup"))
 
 		if test.initialBackup != nil {
 			existingBackup, err := fileService.CreateBackup(context.TODO(), test.initialBackup.backup)
@@ -1552,7 +1941,13 @@ func TestDeleteSnapshot(t *testing.T) {
 			fileService: fileService,
 			cloud:       cloudProvider,
 			volumeLocks: util.NewVolumeLocks(),
-		})
+			tagManager:  cloud.NewFakeTagManager(),
+		}).(*controllerServer)
+
+		cs.config.tagManager.(*cloud.FakeTagServiceManager).
+			On("AttachResourceTags", context.TODO(), cloud.FilestoreBackUp, backupName, region, test.createReq.GetName(), test.createReq.GetParameters()).
+			Return(nil)
+
 		_, err = cs.CreateSnapshot(context.TODO(), test.createReq)
 		if err != nil {
 			t.Errorf("test %q failed: %v", test.name, err)
@@ -1731,6 +2126,434 @@ func TestGetCloudInstancesReservedIPRanges(t *testing.T) {
 		}
 		if !reflect.DeepEqual(test.expectIPRange, ipRange) {
 			t.Errorf("test %q failed; expected: %#v; got %#v", test.name, test.expectIPRange, ipRange)
+		}
+	}
+}
+
+func TestParsingNfsExportOptions(t *testing.T) {
+	cases := []struct {
+		name            string
+		optionsString   string
+		expectedOptions []*file.NfsExportOptions
+		expectErr       bool
+	}{
+		{
+			name: "Base case single options",
+			optionsString: `[
+						{
+							"accessMode": "READ_WRITE",
+							"ipRanges": [
+								"10.0.0.0/24"
+							],
+							"squashMode": "ROOT_SQUASH",
+							"anonUid": "1003",
+							"anonGid": "1003"
+						}
+					]`,
+			expectedOptions: []*file.NfsExportOptions{
+				{
+					AccessMode: "READ_WRITE",
+					IpRanges:   []string{"10.0.0.0/24"},
+					SquashMode: "ROOT_SQUASH",
+					AnonGid:    1003,
+					AnonUid:    1003,
+				},
+			},
+			expectErr: false,
+		},
+		{
+			name: "Base case multiple options",
+			optionsString: `[
+						{
+							"accessMode": "READ_WRITE",
+							"ipRanges": [
+								"10.0.0.0/24"
+							],
+							"squashMode": "ROOT_SQUASH",
+							"anonUid": "1003",
+							"anonGid": "1003"
+						},
+						{
+							"accessMode": "READ_ONLY",
+							"ipRanges": [
+								"10.0.0.0/28"
+							],
+							"squashMode": "NO_ROOT_SQUASH"
+						}
+					]`,
+			expectedOptions: []*file.NfsExportOptions{
+				{
+					AccessMode: "READ_WRITE",
+					IpRanges:   []string{"10.0.0.0/24"},
+					SquashMode: "ROOT_SQUASH",
+					AnonGid:    1003,
+					AnonUid:    1003,
+				},
+				{
+					AccessMode: "READ_ONLY",
+					IpRanges:   []string{"10.0.0.0/28"},
+					SquashMode: "NO_ROOT_SQUASH",
+				},
+			},
+			expectErr: false,
+		},
+		{
+			name: "Invalid extra keys throw an error",
+			optionsString: `[
+						{
+							"accessMode": "READ_WRITE",
+							"ipRanges": [
+								"10.0.0.0/24"
+							],
+							"squashMode": "ROOT_SQUASH",
+							"anonUid": "1003",
+							"anonGid": "1003",
+							"INVALID_KEY": "INVALID_VALUE"
+						}
+					]`,
+			expectErr: true,
+		},
+		{
+			name:            "Empty string returns nil",
+			optionsString:   "",
+			expectedOptions: nil,
+			expectErr:       false,
+		},
+		{
+			name: "Invalid json returns error",
+			optionsString: `
+						{
+							"accessMode": "READ_WRITE",
+							"ipRanges": [
+								"10.0.0.0/24"
+							],
+							`,
+			expectErr: true,
+		},
+	}
+	for _, test := range cases {
+		parsedOptions, err := parseNfsExportOptions(test.optionsString)
+		if !test.expectErr && err != nil {
+			t.Errorf("test %q failed: %v", test.name, err)
+		}
+		if !reflect.DeepEqual(test.expectedOptions, parsedOptions) {
+			t.Errorf("test %q failed; expected: %#v; got %#v", test.name, test.expectedOptions, parsedOptions)
+		}
+	}
+}
+
+func TestExtractLabels(t *testing.T) {
+	var (
+		driverName      = "test_driver"
+		pvcName         = "test_pvc"
+		pvcNamespace    = "test_pvc_namespace"
+		pvName          = "test_pv"
+		parameterLabels = "key1=value1,key2=value2"
+	)
+
+	cases := []struct {
+		name         string
+		parameters   map[string]string
+		cliLabels    map[string]string
+		expectLabels map[string]string
+		expectError  string
+	}{
+		{
+			name: "Success case",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+				ParameterKeyLabels:       parameterLabels,
+			},
+			cliLabels: map[string]string{
+				"key3": "value3",
+				"key4": "value4",
+			},
+			expectLabels: map[string]string{
+				"key1":                         "value1",
+				"key2":                         "value2",
+				"key3":                         "value3",
+				"key4":                         "value4",
+				tagKeyCreatedForVolumeName:     pvName,
+				tagKeyCreatedForClaimName:      pvcName,
+				tagKeyCreatedForClaimNamespace: pvcNamespace,
+				tagKeyCreatedBy:                driverName,
+			},
+		},
+		{
+			name: "Parsing labels in storageClass fails(invalid KV separator(:) used)",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+				ParameterKeyLabels:       "key1:value1,key2:value2",
+			},
+			cliLabels: map[string]string{
+				"key3": "value3",
+				"key4": "value4",
+			},
+			expectLabels: nil,
+			expectError:  `parameters contain invalid labels parameter: labels "key1:value1,key2:value2" are invalid, correct format: 'key1=value1,key2=value2'`,
+		},
+		{
+			name: "storageClass labels contain reserved metadata label(kubernetes_io_created-for_pv_name)",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+				ParameterKeyLabels:       "key1=value1,key2=value2,kubernetes_io_created-for_pv_name=test",
+			},
+			cliLabels: map[string]string{
+				"key3": "value3",
+				"key4": "value4",
+			},
+			expectLabels: nil,
+			expectError:  `storage Class labels cannot contain metadata label key kubernetes_io_created-for_pv_name`,
+		},
+		{
+			name: "storageClass labels parameter not present, only the CLI labels are defined",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+			},
+			cliLabels: map[string]string{
+				"key3": "value3",
+				"key4": "value4",
+			},
+			expectLabels: map[string]string{
+				"key3":                         "value3",
+				"key4":                         "value4",
+				tagKeyCreatedForVolumeName:     pvName,
+				tagKeyCreatedForClaimName:      pvcName,
+				tagKeyCreatedForClaimNamespace: pvcNamespace,
+				tagKeyCreatedBy:                driverName,
+			},
+		},
+		{
+			name: "CLI labels not defined, labels are defined only in the storageClass object",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+				ParameterKeyLabels:       parameterLabels,
+			},
+			cliLabels: nil,
+			expectLabels: map[string]string{
+				"key1":                         "value1",
+				"key2":                         "value2",
+				tagKeyCreatedForVolumeName:     pvName,
+				tagKeyCreatedForClaimName:      pvcName,
+				tagKeyCreatedForClaimNamespace: pvcNamespace,
+				tagKeyCreatedBy:                driverName,
+			},
+		},
+		{
+			name: "CLI labels and storageClass labels parameter not defined",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+			},
+			cliLabels: nil,
+			expectLabels: map[string]string{
+				tagKeyCreatedForVolumeName:     pvName,
+				tagKeyCreatedForClaimName:      pvcName,
+				tagKeyCreatedForClaimNamespace: pvcNamespace,
+				tagKeyCreatedBy:                driverName,
+			},
+		},
+		{
+			name: "CLI labels and storageClass labels has duplicates",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+				ParameterKeyLabels:       parameterLabels,
+			},
+			cliLabels: map[string]string{
+				"key1": "value1",
+				"key2": "value202",
+			},
+			expectLabels: map[string]string{
+				"key1":                         "value1",
+				"key2":                         "value2",
+				tagKeyCreatedForVolumeName:     pvName,
+				tagKeyCreatedForClaimName:      pvcName,
+				tagKeyCreatedForClaimNamespace: pvcNamespace,
+				tagKeyCreatedBy:                driverName,
+			},
+		},
+	}
+	for _, test := range cases {
+		labels, err := extractLabels(test.parameters, test.cliLabels, driverName)
+		if (err != nil || test.expectError != "") && err.Error() != test.expectError {
+			t.Errorf("extractLabels(): %s: got: %v, expectErr: %v", test.name, err, test.expectError)
+		}
+		if !reflect.DeepEqual(test.expectLabels, labels) {
+			t.Errorf("extractLabels(): %s: got: %v, want: %v", test.name, labels, test.expectLabels)
+		}
+	}
+}
+
+func TestExtractBackupLabels(t *testing.T) {
+	var (
+		driverName      = "test_driver"
+		snapshotName    = "test_snapshot"
+		pvcName         = "test_pvc"
+		pvcNamespace    = "test_pvc_namespace"
+		pvName          = "test_pv"
+		parameterLabels = "key1=value1,key2=value2"
+	)
+
+	cases := []struct {
+		name         string
+		parameters   map[string]string
+		cliLabels    map[string]string
+		expectLabels map[string]string
+		expectError  string
+	}{
+		{
+			name: "Success case",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+				ParameterKeyLabels:       parameterLabels,
+			},
+			cliLabels: map[string]string{
+				"key3": "value3",
+				"key4": "value4",
+			},
+			expectLabels: map[string]string{
+				"key1":                         "value1",
+				"key2":                         "value2",
+				"key3":                         "value3",
+				"key4":                         "value4",
+				tagKeyCreatedForVolumeName:     pvName,
+				tagKeyCreatedForClaimName:      pvcName,
+				tagKeyCreatedForClaimNamespace: pvcNamespace,
+				tagKeyCreatedBy:                driverName,
+				tagKeySnapshotName:             snapshotName,
+			},
+		},
+		{
+			name: "Parsing labels in storageClass fails(invalid KV separator(:) used)",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+				ParameterKeyLabels:       "key1:value1,key2:value2",
+			},
+			cliLabels: map[string]string{
+				"key3": "value3",
+				"key4": "value4",
+			},
+			expectLabels: nil,
+			expectError:  `parameters contain invalid labels parameter: labels "key1:value1,key2:value2" are invalid, correct format: 'key1=value1,key2=value2'`,
+		},
+		{
+			name: "storageClass labels contain reserved metadata label(kubernetes_io_created-for_pv_name)",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+				ParameterKeyLabels:       "key1=value1,key2=value2,kubernetes_io_created-for_pv_name=test",
+			},
+			cliLabels: map[string]string{
+				"key3": "value3",
+				"key4": "value4",
+			},
+			expectLabels: nil,
+			expectError:  `storage Class labels cannot contain metadata label key kubernetes_io_created-for_pv_name`,
+		},
+		{
+			name: "storageClass labels parameter not present, only the CLI labels are defined",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+			},
+			cliLabels: map[string]string{
+				"key3": "value3",
+				"key4": "value4",
+			},
+			expectLabels: map[string]string{
+				"key3":                         "value3",
+				"key4":                         "value4",
+				tagKeyCreatedForVolumeName:     pvName,
+				tagKeyCreatedForClaimName:      pvcName,
+				tagKeyCreatedForClaimNamespace: pvcNamespace,
+				tagKeyCreatedBy:                driverName,
+				tagKeySnapshotName:             snapshotName,
+			},
+		},
+		{
+			name: "CLI labels not defined, labels are defined only in the storageClass object",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+				ParameterKeyLabels:       parameterLabels,
+			},
+			cliLabels: nil,
+			expectLabels: map[string]string{
+				"key1":                         "value1",
+				"key2":                         "value2",
+				tagKeyCreatedForVolumeName:     pvName,
+				tagKeyCreatedForClaimName:      pvcName,
+				tagKeyCreatedForClaimNamespace: pvcNamespace,
+				tagKeyCreatedBy:                driverName,
+				tagKeySnapshotName:             snapshotName,
+			},
+		},
+		{
+			name: "CLI labels and storageClass labels parameter not defined",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+			},
+			cliLabels: nil,
+			expectLabels: map[string]string{
+				tagKeyCreatedForVolumeName:     pvName,
+				tagKeyCreatedForClaimName:      pvcName,
+				tagKeyCreatedForClaimNamespace: pvcNamespace,
+				tagKeyCreatedBy:                driverName,
+				tagKeySnapshotName:             snapshotName,
+			},
+		},
+		{
+			name: "CLI labels and storageClass labels has duplicates",
+			parameters: map[string]string{
+				ParameterKeyPVCName:      pvcName,
+				ParameterKeyPVCNamespace: pvcNamespace,
+				ParameterKeyPVName:       pvName,
+				ParameterKeyLabels:       parameterLabels,
+			},
+			cliLabels: map[string]string{
+				"key1": "value1",
+				"key2": "value202",
+			},
+			expectLabels: map[string]string{
+				"key1":                         "value1",
+				"key2":                         "value2",
+				tagKeyCreatedForVolumeName:     pvName,
+				tagKeyCreatedForClaimName:      pvcName,
+				tagKeyCreatedForClaimNamespace: pvcNamespace,
+				tagKeyCreatedBy:                driverName,
+				tagKeySnapshotName:             snapshotName,
+			},
+		},
+	}
+	for _, test := range cases {
+		labels, err := extractBackupLabels(test.parameters, test.cliLabels, driverName, snapshotName)
+		if (err != nil || test.expectError != "") && err.Error() != test.expectError {
+			t.Errorf("extractBackupLabels(): %s: got: %v, expectErr: %v", test.name, err, test.expectError)
+		}
+		if !reflect.DeepEqual(test.expectLabels, labels) {
+			t.Errorf("extractBackupLabels(): %s: got: %v, want: %v", test.name, labels, test.expectLabels)
 		}
 	}
 }

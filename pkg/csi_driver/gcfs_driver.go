@@ -70,6 +70,7 @@ type GCFSDriverConfig struct {
 	ClusterName       string
 	FeatureOptions    *GCFSDriverFeatureOptions
 	ExtraVolumeLabels map[string]string
+	TagManager        cloud.TagService
 }
 
 type GCFSDriver struct {
@@ -96,12 +97,17 @@ type GCFSDriverFeatureOptions struct {
 	// FeatureLockRelease will enable the NFS lock release feature if sets to true.
 	FeatureLockRelease *FeatureLockRelease
 	// FeatureMaxSharesPerInstance will enable CSI driver to pack configurable number of max shares per Filestore instance (multishare)
-	FeatureMaxSharesPerInstance *FeatureMaxSharesPerInstance
-	FeatureStateful             *FeatureStateful
-	FeatureMultishareBackups    *FeatureMultishareBackups
+	FeatureMaxSharesPerInstance     *FeatureMaxSharesPerInstance
+	FeatureStateful                 *FeatureStateful
+	FeatureMultishareBackups        *FeatureMultishareBackups
+	FeatureNFSExportOptionsOnCreate *FeatureNFSExportOptionsOnCreate
 }
 
 type FeatureMultishareBackups struct {
+	Enabled bool
+}
+
+type FeatureNFSExportOptionsOnCreate struct {
 	Enabled bool
 }
 
@@ -199,6 +205,7 @@ func NewGCFSDriver(config *GCFSDriverConfig) (*GCFSDriver, error) {
 			clusterName:       config.ClusterName,
 			features:          config.FeatureOptions,
 			extraVolumeLabels: config.ExtraVolumeLabels,
+			tagManager:        config.TagManager,
 		})
 	}
 

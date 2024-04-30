@@ -1,4 +1,4 @@
-// Copyright 2023 Google LLC.
+// Copyright 2024 Google LLC.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,17 @@
 // Package file provides access to the Cloud Filestore API.
 //
 // For product documentation, see: https://cloud.google.com/filestore/
+//
+// # Library status
+//
+// These client libraries are officially supported by Google. However, this
+// library is considered complete and is in maintenance mode. This means
+// that we will address critical bugs and security issues but will not add
+// any new features.
+//
+// When possible, we recommend using our newer
+// [Cloud Client Libraries for Go](https://pkg.go.dev/cloud.google.com/go)
+// that are still actively being worked and iterated on.
 //
 // # Creating a client
 //
@@ -17,24 +28,26 @@
 //	ctx := context.Background()
 //	fileService, err := file.NewService(ctx)
 //
-// In this example, Google Application Default Credentials are used for authentication.
-//
-// For information on how to create and obtain Application Default Credentials, see https://developers.google.com/identity/protocols/application-default-credentials.
+// In this example, Google Application Default Credentials are used for
+// authentication. For information on how to create and obtain Application
+// Default Credentials, see https://developers.google.com/identity/protocols/application-default-credentials.
 //
 // # Other authentication options
 //
-// To use an API key for authentication (note: some APIs do not support API keys), use option.WithAPIKey:
+// To use an API key for authentication (note: some APIs do not support API
+// keys), use [google.golang.org/api/option.WithAPIKey]:
 //
 //	fileService, err := file.NewService(ctx, option.WithAPIKey("AIza..."))
 //
-// To use an OAuth token (e.g., a user token obtained via a three-legged OAuth flow), use option.WithTokenSource:
+// To use an OAuth token (e.g., a user token obtained via a three-legged OAuth
+// flow, use [google.golang.org/api/option.WithTokenSource]:
 //
 //	config := &oauth2.Config{...}
 //	// ...
 //	token, err := config.Exchange(ctx, ...)
 //	fileService, err := file.NewService(ctx, option.WithTokenSource(config.TokenSource(ctx, token)))
 //
-// See https://godoc.org/google.golang.org/api/option/ for details on options.
+// See [google.golang.org/api/option.ClientOption] for details on options.
 package file // import "google.golang.org/api/file/v1beta1"
 
 import (
@@ -77,7 +90,9 @@ const apiId = "file:v1beta1"
 const apiName = "file"
 const apiVersion = "v1beta1"
 const basePath = "https://file.googleapis.com/"
+const basePathTemplate = "https://file.UNIVERSE_DOMAIN/"
 const mtlsBasePath = "https://file.mtls.googleapis.com/"
+const defaultUniverseDomain = "googleapis.com"
 
 // OAuth2 scopes used by this API.
 const (
@@ -94,7 +109,9 @@ func NewService(ctx context.Context, opts ...option.ClientOption) (*Service, err
 	// NOTE: prepend, so we don't override user-specified scopes.
 	opts = append([]option.ClientOption{scopesOption}, opts...)
 	opts = append(opts, internaloption.WithDefaultEndpoint(basePath))
+	opts = append(opts, internaloption.WithDefaultEndpointTemplate(basePathTemplate))
 	opts = append(opts, internaloption.WithDefaultMTLSEndpoint(mtlsBasePath))
+	opts = append(opts, internaloption.WithDefaultUniverseDomain(defaultUniverseDomain))
 	client, endpoint, err := htransport.NewClient(ctx, opts...)
 	if err != nil {
 		return nil, err
@@ -246,6 +263,9 @@ type Backup struct {
 	// `projects/{project_id}/locations/{location_id}/backups/{backup_id}`.
 	Name string `json:"name,omitempty"`
 
+	// SatisfiesPzi: Output only. Reserved for future use.
+	SatisfiesPzi bool `json:"satisfiesPzi,omitempty"`
+
 	// SatisfiesPzs: Output only. Reserved for future use.
 	SatisfiesPzs bool `json:"satisfiesPzs,omitempty"`
 
@@ -280,6 +300,8 @@ type Backup struct {
 	// availability needed for mission-critical workloads.
 	//   "ZONAL" - ZONAL instances offer expanded capacity and performance
 	// scaling capabilities.
+	//   "REGIONAL" - REGIONAL instances offer the features and availability
+	// needed for mission-critical workloads.
 	SourceInstanceTier string `json:"sourceInstanceTier,omitempty"`
 
 	// State: Output only. The backup state.
@@ -505,9 +527,10 @@ type FileShareConfig struct {
 	// 1 GB as 1024^3 bytes.
 	CapacityGb int64 `json:"capacityGb,omitempty,string"`
 
-	// Name: The name of the file share (must be 32 characters or less for
-	// Enterprise and High Scale SSD tiers and 16 characters or less for all
-	// other tiers).
+	// Name: Required. The name of the file share. Must use 1-16 characters
+	// for the basic service tier and 1-63 characters for all other service
+	// tiers. Must use lowercase letters, numbers, or underscores
+	// `[a-z0-9_]`. Must start with a letter. Immutable.
 	Name string `json:"name,omitempty"`
 
 	// NfsExportOptions: Nfs Export Options. There is a limit of 10 export
@@ -593,7 +616,7 @@ type GoogleCloudSaasacceleratorManagementProvidersV1Instance struct {
 	// been attached to the instance. The key must be of the type name of
 	// the oneof policy name defined in MaintenancePolicy, and the
 	// referenced policy must define the same policy type. For details,
-	// please refer to go/cloud-saas-mw-ug. Should not be set if
+	// please refer to go/mr-user-guide. Should not be set if
 	// maintenance_settings.maintenance_policies is set.
 	MaintenancePolicyNames map[string]string `json:"maintenancePolicyNames,omitempty"`
 
@@ -762,7 +785,7 @@ type GoogleCloudSaasacceleratorManagementProvidersV1MaintenanceSettings struct {
 	// attached to the instance. The key must be of the type name of the
 	// oneof policy name defined in MaintenancePolicy, and the embedded
 	// policy must define the same policy type. For details, please refer to
-	// go/cloud-saas-mw-ug. Should not be set if maintenance_policy_names is
+	// go/mr-user-guide. Should not be set if maintenance_policy_names is
 	// set. If only the name is needed, then only populate
 	// MaintenancePolicy.name.
 	MaintenancePolicies map[string]MaintenancePolicy `json:"maintenancePolicies,omitempty"`
@@ -1039,7 +1062,7 @@ type Instance struct {
 	// less).
 	Description string `json:"description,omitempty"`
 
-	// DirectoryServices: Directory Services configuration for
+	// DirectoryServices: Optional. Directory Services configuration for
 	// Kerberos-based authentication. Should only be set if protocol is
 	// "NFS_V4_1".
 	DirectoryServices *DirectoryServicesConfig `json:"directoryServices,omitempty"`
@@ -1091,6 +1114,9 @@ type Instance struct {
 	//   "NFS_V4_1" - NFS 4.1.
 	Protocol string `json:"protocol,omitempty"`
 
+	// SatisfiesPzi: Output only. Reserved for future use.
+	SatisfiesPzi bool `json:"satisfiesPzi,omitempty"`
+
 	// SatisfiesPzs: Output only. Reserved for future use.
 	SatisfiesPzs bool `json:"satisfiesPzs,omitempty"`
 
@@ -1116,6 +1142,7 @@ type Instance struct {
 	//   "SUSPENDING" - The instance is in the process of becoming
 	// suspended.
 	//   "RESUMING" - The instance is in the process of becoming active.
+	//   "PROMOTING" - The replica instance is being promoted.
 	State string `json:"state,omitempty"`
 
 	// StatusMessage: Output only. Additional information about the instance
@@ -1151,6 +1178,8 @@ type Instance struct {
 	// availability needed for mission-critical workloads.
 	//   "ZONAL" - ZONAL instances offer expanded capacity and performance
 	// scaling capabilities.
+	//   "REGIONAL" - REGIONAL instances offer the features and availability
+	// needed for mission-critical workloads.
 	Tier string `json:"tier,omitempty"`
 
 	// ServerResponse contains the HTTP response code and headers from the
@@ -1472,8 +1501,7 @@ func (s *Location) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
-// MaintenancePolicy: LINT.IfChange Defines policies to service
-// maintenance events.
+// MaintenancePolicy: Defines policies to service maintenance events.
 type MaintenancePolicy struct {
 	// CreateTime: Output only. The time when the resource was created.
 	CreateTime string `json:"createTime,omitempty"`
@@ -1568,13 +1596,14 @@ func (s *MaintenanceWindow) MarshalJSON() ([]byte, error) {
 // ManagedActiveDirectoryConfig: ManagedActiveDirectoryConfig contains
 // all the parameters for connecting to Managed Active Directory.
 type ManagedActiveDirectoryConfig struct {
-	// Computer: The computer name is used as a prefix to the mount remote
-	// target. Example: if the computer_name is `my-computer`, the mount
-	// command will look like: `$mount -o vers=4,sec=krb5
-	// my-computer.filestore.:`.
+	// Computer: Required. The computer name is used as a prefix to the
+	// mount remote target. Example: if the computer is `my-computer`, the
+	// mount command will look like: `$mount -o vers=4.1,sec=krb5
+	// my-computer.filestore.: `.
 	Computer string `json:"computer,omitempty"`
 
-	// Domain: Fully qualified domain name.
+	// Domain: Required. The domain resource name, in the format
+	// `projects/{project_id}/locations/global/domains/{domain}`.
 	Domain string `json:"domain,omitempty"`
 
 	// ForceSendFields is a list of field names (e.g. "Computer") to
@@ -1873,6 +1902,11 @@ func (s *OperationMetadata) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
+// PromoteReplicaRequest: PromoteReplicaRequest promotes a Filestore
+// standby instance (replica).
+type PromoteReplicaRequest struct {
+}
+
 // RestoreInstanceRequest: RestoreInstanceRequest restores an existing
 // instance's file share from a backup.
 type RestoreInstanceRequest struct {
@@ -1918,8 +1952,8 @@ type RevertInstanceRequest struct {
 	// TargetSnapshotId: Required. The snapshot resource ID, in the format
 	// 'my-snapshot', where the specified ID is the {snapshot_id} of the
 	// fully qualified name like
-	// projects/{project_id}/locations/{location_id}/instances/{instance_id}/
-	// snapshots/{snapshot_id}
+	// `projects/{project_id}/locations/{location_id}/instances/{instance_id}
+	// /snapshots/{snapshot_id}`
 	TargetSnapshotId string `json:"targetSnapshotId,omitempty"`
 
 	// ForceSendFields is a list of field names (e.g. "TargetSnapshotId") to
@@ -4185,7 +4219,8 @@ func (r *ProjectsLocationsInstancesService) Patch(name string, instance *Instanc
 // UpdateMask sets the optional parameter "updateMask": Required. Mask
 // of fields to update. At least one path must be supplied in this
 // field. The elements of the repeated paths field may only include
-// these fields: * "description" * "file_shares" * "labels"
+// these fields: * "description" * "directory_services" * "file_shares"
+// * "labels"
 func (c *ProjectsLocationsInstancesPatchCall) UpdateMask(updateMask string) *ProjectsLocationsInstancesPatchCall {
 	c.urlParams_.Set("updateMask", updateMask)
 	return c
@@ -4298,7 +4333,7 @@ func (c *ProjectsLocationsInstancesPatchCall) Do(opts ...googleapi.CallOption) (
 	//       "type": "string"
 	//     },
 	//     "updateMask": {
-	//       "description": "Required. Mask of fields to update. At least one path must be supplied in this field. The elements of the repeated paths field may only include these fields: * \"description\" * \"file_shares\" * \"labels\"",
+	//       "description": "Required. Mask of fields to update. At least one path must be supplied in this field. The elements of the repeated paths field may only include these fields: * \"description\" * \"directory_services\" * \"file_shares\" * \"labels\"",
 	//       "format": "google-fieldmask",
 	//       "location": "query",
 	//       "type": "string"
@@ -4307,6 +4342,150 @@ func (c *ProjectsLocationsInstancesPatchCall) Do(opts ...googleapi.CallOption) (
 	//   "path": "v1beta1/{+name}",
 	//   "request": {
 	//     "$ref": "Instance"
+	//   },
+	//   "response": {
+	//     "$ref": "Operation"
+	//   },
+	//   "scopes": [
+	//     "https://www.googleapis.com/auth/cloud-platform"
+	//   ]
+	// }
+
+}
+
+// method id "file.projects.locations.instances.promoteReplica":
+
+type ProjectsLocationsInstancesPromoteReplicaCall struct {
+	s                     *Service
+	name                  string
+	promotereplicarequest *PromoteReplicaRequest
+	urlParams_            gensupport.URLParams
+	ctx_                  context.Context
+	header_               http.Header
+}
+
+// PromoteReplica: Promote an standby instance (replica).
+//
+//   - name: The resource name of the instance, in the format
+//     `projects/{project_id}/locations/{location_id}/instances/{instance_i
+//     d}`.
+func (r *ProjectsLocationsInstancesService) PromoteReplica(name string, promotereplicarequest *PromoteReplicaRequest) *ProjectsLocationsInstancesPromoteReplicaCall {
+	c := &ProjectsLocationsInstancesPromoteReplicaCall{s: r.s, urlParams_: make(gensupport.URLParams)}
+	c.name = name
+	c.promotereplicarequest = promotereplicarequest
+	return c
+}
+
+// Fields allows partial responses to be retrieved. See
+// https://developers.google.com/gdata/docs/2.0/basics#PartialResponse
+// for more information.
+func (c *ProjectsLocationsInstancesPromoteReplicaCall) Fields(s ...googleapi.Field) *ProjectsLocationsInstancesPromoteReplicaCall {
+	c.urlParams_.Set("fields", googleapi.CombineFields(s))
+	return c
+}
+
+// Context sets the context to be used in this call's Do method. Any
+// pending HTTP request will be aborted if the provided context is
+// canceled.
+func (c *ProjectsLocationsInstancesPromoteReplicaCall) Context(ctx context.Context) *ProjectsLocationsInstancesPromoteReplicaCall {
+	c.ctx_ = ctx
+	return c
+}
+
+// Header returns an http.Header that can be modified by the caller to
+// add HTTP headers to the request.
+func (c *ProjectsLocationsInstancesPromoteReplicaCall) Header() http.Header {
+	if c.header_ == nil {
+		c.header_ = make(http.Header)
+	}
+	return c.header_
+}
+
+func (c *ProjectsLocationsInstancesPromoteReplicaCall) doRequest(alt string) (*http.Response, error) {
+	reqHeaders := make(http.Header)
+	reqHeaders.Set("x-goog-api-client", "gl-go/"+gensupport.GoVersion()+" gdcl/"+internal.Version)
+	for k, v := range c.header_ {
+		reqHeaders[k] = v
+	}
+	reqHeaders.Set("User-Agent", c.s.userAgent())
+	var body io.Reader = nil
+	body, err := googleapi.WithoutDataWrapper.JSONReader(c.promotereplicarequest)
+	if err != nil {
+		return nil, err
+	}
+	reqHeaders.Set("Content-Type", "application/json")
+	c.urlParams_.Set("alt", alt)
+	c.urlParams_.Set("prettyPrint", "false")
+	urls := googleapi.ResolveRelative(c.s.BasePath, "v1beta1/{+name}:promoteReplica")
+	urls += "?" + c.urlParams_.Encode()
+	req, err := http.NewRequest("POST", urls, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = reqHeaders
+	googleapi.Expand(req.URL, map[string]string{
+		"name": c.name,
+	})
+	return gensupport.SendRequest(c.ctx_, c.s.client, req)
+}
+
+// Do executes the "file.projects.locations.instances.promoteReplica" call.
+// Exactly one of *Operation or error will be non-nil. Any non-2xx
+// status code is an error. Response headers are in either
+// *Operation.ServerResponse.Header or (if a response was returned at
+// all) in error.(*googleapi.Error).Header. Use googleapi.IsNotModified
+// to check whether the returned error was because
+// http.StatusNotModified was returned.
+func (c *ProjectsLocationsInstancesPromoteReplicaCall) Do(opts ...googleapi.CallOption) (*Operation, error) {
+	gensupport.SetOptions(c.urlParams_, opts...)
+	res, err := c.doRequest("json")
+	if res != nil && res.StatusCode == http.StatusNotModified {
+		if res.Body != nil {
+			res.Body.Close()
+		}
+		return nil, gensupport.WrapError(&googleapi.Error{
+			Code:   res.StatusCode,
+			Header: res.Header,
+		})
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer googleapi.CloseBody(res)
+	if err := googleapi.CheckResponse(res); err != nil {
+		return nil, gensupport.WrapError(err)
+	}
+	ret := &Operation{
+		ServerResponse: googleapi.ServerResponse{
+			Header:         res.Header,
+			HTTPStatusCode: res.StatusCode,
+		},
+	}
+	target := &ret
+	if err := gensupport.DecodeResponse(target, res); err != nil {
+		return nil, err
+	}
+	return ret, nil
+	// {
+	//   "description": "Promote an standby instance (replica).",
+	//   "flatPath": "v1beta1/projects/{projectsId}/locations/{locationsId}/instances/{instancesId}:promoteReplica",
+	//   "httpMethod": "POST",
+	//   "id": "file.projects.locations.instances.promoteReplica",
+	//   "parameterOrder": [
+	//     "name"
+	//   ],
+	//   "parameters": {
+	//     "name": {
+	//       "description": "Required. The resource name of the instance, in the format `projects/{project_id}/locations/{location_id}/instances/{instance_id}`.",
+	//       "location": "path",
+	//       "pattern": "^projects/[^/]+/locations/[^/]+/instances/[^/]+$",
+	//       "required": true,
+	//       "type": "string"
+	//     }
+	//   },
+	//   "path": "v1beta1/{+name}:promoteReplica",
+	//   "request": {
+	//     "$ref": "PromoteReplicaRequest"
 	//   },
 	//   "response": {
 	//     "$ref": "Operation"
@@ -4479,9 +4658,9 @@ type ProjectsLocationsInstancesRevertCall struct {
 // Revert: Revert an existing instance's file system to a specified
 // snapshot.
 //
-//   - name:
-//     projects/{project_id}/locations/{location_id}/instances/{instance_id
-//     }. The resource name of the instance, in the format.
+//   - name: The resource name of the instance, in the format
+//     `projects/{project_id}/locations/{location_id}/instances/{instance_i
+//     d}`.
 func (r *ProjectsLocationsInstancesService) Revert(name string, revertinstancerequest *RevertInstanceRequest) *ProjectsLocationsInstancesRevertCall {
 	c := &ProjectsLocationsInstancesRevertCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -4589,7 +4768,7 @@ func (c *ProjectsLocationsInstancesRevertCall) Do(opts ...googleapi.CallOption) 
 	//   ],
 	//   "parameters": {
 	//     "name": {
-	//       "description": "Required. projects/{project_id}/locations/{location_id}/instances/{instance_id}. The resource name of the instance, in the format",
+	//       "description": "Required. The resource name of the instance, in the format `projects/{project_id}/locations/{location_id}/instances/{instance_id}`.",
 	//       "location": "path",
 	//       "pattern": "^projects/[^/]+/locations/[^/]+/instances/[^/]+$",
 	//       "required": true,

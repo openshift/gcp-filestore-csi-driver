@@ -57,16 +57,19 @@ const (
 
 // MultishareController handles CSI calls for volumes which use Filestore multishare instances.
 type MultishareController struct {
-	driver                     *GCFSDriver
-	fileService                file.Service
-	cloud                      *cloud.Cloud
-	opsManager                 *MultishareOpsManager
-	volumeLocks                *util.VolumeLocks
-	ecfsDescription            string
-	isRegional                 bool
-	clustername                string
-	featureMaxSharePerInstance bool
-	featureMultishareBackups   bool
+	driver                          *GCFSDriver
+	fileService                     file.Service
+	cloud                           *cloud.Cloud
+	opsManager                      *MultishareOpsManager
+	volumeLocks                     *util.VolumeLocks
+	ecfsDescription                 string
+	isRegional                      bool
+	clustername                     string
+	featureMaxSharePerInstance      bool
+	featureMultishareBackups        bool
+	featureNFSExportOptionsOnCreate bool
+	extraVolumeLabels               map[string]string
+	tagManager                      cloud.TagService
 
 	// Filestore instance description overrides
 	descOverrideMaxSharesPerInstance string
@@ -80,13 +83,15 @@ type MultishareController struct {
 
 func NewMultishareController(config *controllerServerConfig) *MultishareController {
 	c := &MultishareController{
-		driver:          config.driver,
-		fileService:     config.fileService,
-		cloud:           config.cloud,
-		volumeLocks:     config.volumeLocks,
-		ecfsDescription: config.ecfsDescription,
-		isRegional:      config.isRegional,
-		clustername:     config.clusterName,
+		driver:            config.driver,
+		fileService:       config.fileService,
+		cloud:             config.cloud,
+		volumeLocks:       config.volumeLocks,
+		ecfsDescription:   config.ecfsDescription,
+		isRegional:        config.isRegional,
+		clustername:       config.clusterName,
+		extraVolumeLabels: config.extraVolumeLabels,
+		tagManager:        config.tagManager,
 	}
 	c.opsManager = NewMultishareOpsManager(config.cloud, c)
 	if config.features != nil && config.features.FeatureMaxSharesPerInstance != nil {
@@ -102,6 +107,9 @@ func NewMultishareController(config *controllerServerConfig) *MultishareControll
 
 	if config.features != nil && config.features.FeatureMultishareBackups != nil {
 		c.featureMultishareBackups = config.features.FeatureMultishareBackups.Enabled
+	}
+	if config.features != nil && config.features.FeatureNFSExportOptionsOnCreate != nil {
+		c.featureNFSExportOptionsOnCreate = config.features.FeatureNFSExportOptionsOnCreate.Enabled
 	}
 
 	return c
@@ -264,6 +272,7 @@ func (m *MultishareController) CreateSnapshot(ctx context.Context, req *csi.Crea
 		return nil, file.StatusError(err)
 	}
 
+	var snapshotResponse *csi.CreateSnapshotResponse
 	if backupExists {
 		// process existing backup
 
@@ -271,9 +280,9 @@ func (m *MultishareController) CreateSnapshot(ctx context.Context, req *csi.Crea
 		if err != nil {
 			return nil, err
 		}
-		return &csi.CreateSnapshotResponse{
+		snapshotResponse = &csi.CreateSnapshotResponse{
 			Snapshot: snapshot,
-		}, nil
+		}
 	} else {
 		//no existing backup
 		backupInfo := &file.BackupInfo{
@@ -286,21 +295,27 @@ func (m *MultishareController) CreateSnapshot(ctx context.Context, req *csi.Crea
 			BackupURI:          backupURI,
 		}
 
-		labels, err := extractBackupLabels(req.GetParameters(), m.driver.config.Name, req.Name)
+		labels, err := extractBackupLabels(req.GetParameters(), m.extraVolumeLabels, m.driver.config.Name, req.Name)
 		if err != nil {
 			return nil, err
 		}
 		backupInfo.Labels = labels
+
 		snapshot, err := m.createNewBackup(ctx, backupInfo)
 		if err != nil {
 			return nil, err
 		}
 
-		resp := &csi.CreateSnapshotResponse{
+		snapshotResponse = &csi.CreateSnapshotResponse{
 			Snapshot: snapshot,
 		}
-		return resp, nil
 	}
+
+	if err := m.tagManager.AttachResourceTags(ctx, cloud.FilestoreBackUp, name, backupRegion, req.GetName(), req.GetParameters()); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+
+	return snapshotResponse, nil
 }
 
 func (m *MultishareController) createNewBackup(ctx context.Context, backupInfo *file.BackupInfo) (*csi.Snapshot, error) {
@@ -570,6 +585,12 @@ func (m *MultishareController) generateNewMultishareInstance(instanceName string
 			}
 		case ParamInstanceEncryptionKmsKey:
 			kmsKeyName = v
+		// Ensure we don't flag the nfsExportOptions param as invalid. Value will be used when creating a new share
+		case ParamNfsExportOptions:
+			if !m.featureNFSExportOptionsOnCreate {
+				return nil, status.Error(codes.InvalidArgument, "nfsExportOptions are disabled")
+			}
+			continue
 		// Ignore the cidr flag as it is not passed to the cloud provider
 		// It will be used to get unreserved IP in the reserveIPV4Range function
 		// ignore IPRange flag as it will be handled at the same place as cidr
@@ -578,6 +599,8 @@ func (m *MultishareController) generateNewMultishareInstance(instanceName string
 		case ParamMultishareInstanceScLabel:
 			continue
 		case paramMaxVolumeSize:
+			continue
+		case cloud.ParameterKeyResourceTags:
 			continue
 		case ParameterKeyLabels, ParameterKeyPVCName, ParameterKeyPVCNamespace, ParameterKeyPVName, paramMultishare:
 		case "csiprovisionersecretname", "csiprovisionersecretnamespace":
@@ -597,7 +620,7 @@ func (m *MultishareController) generateNewMultishareInstance(instanceName string
 			return nil, status.Errorf(codes.InvalidArgument, "failed to get region for regional cluster: %v", err.Error())
 		}
 	}
-	labels, err := extractInstanceLabels(req.GetParameters(), m.driver.config.Name, m.clustername, location)
+	labels, err := extractInstanceLabels(req.GetParameters(), m.extraVolumeLabels, m.driver.config.Name, m.clustername, location)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}
@@ -657,14 +680,22 @@ func generateNewShare(name string, parent *file.MultishareInstance, req *csi.Cre
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	var nfsExportOptions []*file.NfsExportOptions
+	if req.GetParameters()[ParamNfsExportOptions] != "" {
+		nfsExportOptions, err = parseNfsExportOptions(req.GetParameters()[ParamNfsExportOptions])
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+	}
 
 	share := &file.Share{
-		Name:           name,
-		Parent:         parent,
-		CapacityBytes:  targetSizeBytes,
-		Labels:         extractShareLabels(req.Parameters),
-		MountPointName: name,
-		BackupId:       sourceSnapshotId,
+		Name:             name,
+		Parent:           parent,
+		CapacityBytes:    targetSizeBytes,
+		Labels:           extractShareLabels(req.Parameters),
+		NfsExportOptions: nfsExportOptions,
+		MountPointName:   name,
+		BackupId:         sourceSnapshotId,
 	}
 	return share, nil
 }
@@ -690,7 +721,7 @@ func (m *MultishareController) pickRegion(top *csi.TopologyRequirement) (string,
 	return region, nil
 }
 
-func extractInstanceLabels(parameters map[string]string, driverName, clusterName, location string) (map[string]string, error) {
+func extractInstanceLabels(parameters, cliLabels map[string]string, driverName, clusterName, location string) (map[string]string, error) {
 	instanceLabels := make(map[string]string)
 	userProvidedLabels := make(map[string]string)
 	for k, v := range parameters {
@@ -713,7 +744,7 @@ func extractInstanceLabels(parameters map[string]string, driverName, clusterName
 	instanceLabels[tagKeyCreatedBy] = strings.ReplaceAll(driverName, ".", "_")
 	instanceLabels[TagKeyClusterName] = clusterName
 	instanceLabels[TagKeyClusterLocation] = location
-	finalInstanceLabels, err := mergeLabels(userProvidedLabels, instanceLabels)
+	finalInstanceLabels, err := mergeLabels(userProvidedLabels, instanceLabels, cliLabels)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}

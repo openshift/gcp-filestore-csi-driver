@@ -64,6 +64,7 @@ func initTestMultishareController(t *testing.T) *MultishareController {
 		ecfsDescription: "",
 		isRegional:      true,
 		clusterName:     testClusterName,
+		tagManager:      cloud.NewFakeTagManager(),
 	}
 	return NewMultishareController(config)
 }
@@ -88,6 +89,7 @@ func initTestMultishareControllerWithFeatureOpts(t *testing.T, features *GCFSDri
 		isRegional:      true,
 		clusterName:     testClusterName,
 		features:        features,
+		tagManager:      cloud.NewFakeTagManager(),
 	}
 	return NewMultishareController(config)
 }
@@ -419,10 +421,15 @@ func TestGetShareRequestCapacity(t *testing.T) {
 }
 
 func TestExtractInstanceLabels(t *testing.T) {
+	var (
+		parameterLabels = "key1=value1,key2=value2"
+	)
+
 	tests := []struct {
 		name          string
 		params        map[string]string
 		driver        string
+		cliLabels     map[string]string
 		expectedLabel map[string]string
 		expectErr     bool
 	}{
@@ -451,10 +458,108 @@ func TestExtractInstanceLabels(t *testing.T) {
 				TagKeyClusterLocation:                  testLocation,
 			},
 		},
+		{
+			name:   "Parsing labels in storageClass fails(invalid KV separator(:) used)",
+			driver: testDriverName,
+			params: map[string]string{
+				ParamMultishareInstanceScLabel: "testsc",
+				ParameterKeyLabels:             "key1:value1,key2:value2",
+			},
+			cliLabels: map[string]string{
+				"key3": "value3",
+				"key4": "value4",
+			},
+			expectedLabel: nil,
+			expectErr:     true,
+		},
+		{
+			name:   "storageClass labels contain reserved metadata label(storage_gke_io_created-by)",
+			driver: testDriverName,
+			params: map[string]string{
+				ParamMultishareInstanceScLabel: "testsc",
+				ParameterKeyLabels:             "key1=value1,key2=value2,storage_gke_io_created-by=test_filestore",
+			},
+			cliLabels: map[string]string{
+				"key3": "value3",
+				"key4": "value4",
+			},
+			expectedLabel: nil,
+			expectErr:     true,
+		},
+		{
+			name:   "storageClass labels parameter not present, only the CLI labels are defined",
+			driver: testDriverName,
+			params: map[string]string{
+				ParamMultishareInstanceScLabel: "testsc",
+			},
+			cliLabels: map[string]string{
+				"key3": "value3",
+				"key4": "value4",
+			},
+			expectedLabel: map[string]string{
+				"key3":                                 "value3",
+				"key4":                                 "value4",
+				tagKeyCreatedBy:                        testDrivernameLabelValue,
+				util.ParamMultishareInstanceScLabelKey: "testsc",
+				TagKeyClusterName:                      testClusterName,
+				TagKeyClusterLocation:                  testLocation,
+			},
+		},
+		{
+			name:   "CLI labels not defined, labels are defined only in storageClass object",
+			driver: testDriverName,
+			params: map[string]string{
+				ParamMultishareInstanceScLabel: "testsc",
+				ParameterKeyLabels:             parameterLabels,
+			},
+			cliLabels: nil,
+			expectedLabel: map[string]string{
+				"key1":                                 "value1",
+				"key2":                                 "value2",
+				tagKeyCreatedBy:                        testDrivernameLabelValue,
+				util.ParamMultishareInstanceScLabelKey: "testsc",
+				TagKeyClusterName:                      testClusterName,
+				TagKeyClusterLocation:                  testLocation,
+			},
+		},
+		{
+			name:   "CLI labels and storageClass labels parameter not defined",
+			driver: testDriverName,
+			params: map[string]string{
+				ParamMultishareInstanceScLabel: "testsc",
+			},
+			cliLabels: nil,
+			expectedLabel: map[string]string{
+				tagKeyCreatedBy:                        testDrivernameLabelValue,
+				util.ParamMultishareInstanceScLabelKey: "testsc",
+				TagKeyClusterName:                      testClusterName,
+				TagKeyClusterLocation:                  testLocation,
+			},
+		},
+		{
+			name:   "CLI labels and storageClass labels has duplicates",
+			driver: testDriverName,
+			params: map[string]string{
+				ParamMultishareInstanceScLabel: "testsc",
+				ParameterKeyLabels:             parameterLabels,
+			},
+			cliLabels: map[string]string{
+				"key1": "value1",
+				"key2": "value202",
+			},
+			expectedLabel: map[string]string{
+				"key1":                                 "value1",
+				"key2":                                 "value2",
+				tagKeyCreatedBy:                        testDrivernameLabelValue,
+				util.ParamMultishareInstanceScLabelKey: "testsc",
+				TagKeyClusterName:                      testClusterName,
+				TagKeyClusterLocation:                  testLocation,
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			label, err := extractInstanceLabels(tc.params, tc.driver, testClusterName, testLocation)
+			label, err := extractInstanceLabels(tc.params, tc.cliLabels, tc.driver, testClusterName, testLocation)
 			if tc.expectErr && err == nil {
 				t.Error("expected error, got none")
 			}
@@ -792,6 +897,14 @@ func TestMultishareCreateVolume(t *testing.T) {
 	testShareName := util.ConvertVolToShareName(testVolName)
 	testInstanceName1 := "fs-" + string(uuid.NewUUID())
 	testInstanceName2 := "fs-" + string(uuid.NewUUID())
+	features := &GCFSDriverFeatureOptions{
+		FeatureMultishareBackups: &FeatureMultishareBackups{
+			Enabled: true,
+		},
+		FeatureNFSExportOptionsOnCreate: &FeatureNFSExportOptionsOnCreate{
+			Enabled: true,
+		},
+	}
 	type OpItem struct {
 		id     string
 		target string
@@ -806,8 +919,10 @@ func TestMultishareCreateVolume(t *testing.T) {
 		initShares        []*file.Share
 		req               *csi.CreateVolumeRequest
 		resp              *csi.CreateVolumeResponse
+		expectedOptions   []*file.NfsExportOptions
 		errorExpected     bool
 		checkOnlyVolidFmt bool // for auto generated instance, the instance name is not known
+		features          *GCFSDriverFeatureOptions
 	}{
 		{
 			name: "create volume called with volume size < 100G in required bytes",
@@ -923,6 +1038,126 @@ func TestMultishareCreateVolume(t *testing.T) {
 				},
 			},
 			checkOnlyVolidFmt: true,
+		},
+		{
+			name: "no initial instances, create instance and share, success response",
+			req: &csi.CreateVolumeRequest{
+				Name: testVolName,
+				CapacityRange: &csi.CapacityRange{
+					RequiredBytes: 100 * util.Gb,
+				},
+				Parameters: map[string]string{
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
+				},
+				VolumeCapabilities: []*csi.VolumeCapability{
+					{
+						AccessType: &csi.VolumeCapability_Mount{
+							Mount: &csi.VolumeCapability_MountVolume{},
+						},
+						AccessMode: &csi.VolumeCapability_AccessMode{
+							Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+						},
+					},
+				},
+			},
+			checkOnlyVolidFmt: true,
+		},
+		{
+			name: "nfs-export-options feature is disabled",
+			req: &csi.CreateVolumeRequest{
+				Name: testVolName,
+				CapacityRange: &csi.CapacityRange{
+					RequiredBytes: 100 * util.Gb,
+				},
+				Parameters: map[string]string{
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamNfsExportOptions: `[
+						{
+							"accessMode": "READ_WRITE",
+							"ipRanges": [
+								"10.0.0.0/24"
+						],
+							"squashMode": "ROOT_SQUASH",
+							"anonUid": "1003",
+							"anonGid": "1003"
+						},
+						{
+							"accessMode": "READ_ONLY",
+							"ipRanges": [
+								"10.0.0.0/28"
+							],
+							"squashMode": "NO_ROOT_SQUASH"
+							}
+					]`,
+				},
+				VolumeCapabilities: []*csi.VolumeCapability{
+					{
+						AccessType: &csi.VolumeCapability_Mount{
+							Mount: &csi.VolumeCapability_MountVolume{},
+						},
+						AccessMode: &csi.VolumeCapability_AccessMode{
+							Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+						},
+					},
+				},
+			},
+			errorExpected: true,
+		},
+		{
+			name: "add nfs-export-options",
+			req: &csi.CreateVolumeRequest{
+				Name: testVolName,
+				CapacityRange: &csi.CapacityRange{
+					RequiredBytes: 100 * util.Gb,
+				},
+				Parameters: map[string]string{
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamNfsExportOptions: `[
+						{
+							"accessMode": "READ_WRITE",
+							"ipRanges": [
+								"10.0.0.0/24"
+						],
+							"squashMode": "ROOT_SQUASH",
+							"anonUid": "1003",
+							"anonGid": "1003"
+						},
+						{
+							"accessMode": "READ_ONLY",
+							"ipRanges": [
+								"10.0.0.0/28"
+							],
+							"squashMode": "NO_ROOT_SQUASH"
+							}
+					]`,
+				},
+				VolumeCapabilities: []*csi.VolumeCapability{
+					{
+						AccessType: &csi.VolumeCapability_Mount{
+							Mount: &csi.VolumeCapability_MountVolume{},
+						},
+						AccessMode: &csi.VolumeCapability_AccessMode{
+							Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+						},
+					},
+				},
+			},
+			features:          features,
+			checkOnlyVolidFmt: true,
+			expectedOptions: []*file.NfsExportOptions{
+				{
+					AccessMode: "READ_WRITE",
+					IpRanges:   []string{"10.0.0.0/24"},
+					SquashMode: "ROOT_SQUASH",
+					AnonGid:    1003,
+					AnonUid:    1003,
+				},
+				{
+					AccessMode: "READ_ONLY",
+					IpRanges:   []string{"10.0.0.0/28"},
+					SquashMode: "NO_ROOT_SQUASH",
+				},
+			},
 		},
 		{
 			name: "1 initial ready 1Tib instances with 0 shares, 1 busy instance, create 100Gib share and use the ready instance, success response",
@@ -1148,6 +1383,7 @@ func TestMultishareCreateVolume(t *testing.T) {
 				cloud:           cloudProvider,
 				volumeLocks:     util.NewVolumeLocks(),
 				ecfsDescription: "",
+				features:        tc.features,
 			}
 			mcs := NewMultishareController(config)
 			resp, err := mcs.CreateVolume(context.Background(), tc.req)
@@ -1155,7 +1391,19 @@ func TestMultishareCreateVolume(t *testing.T) {
 				t.Errorf("expected error not found")
 			}
 			if !tc.errorExpected && err != nil {
-				t.Errorf("unexpected error")
+				t.Errorf("unexpected error %s", err)
+			}
+			if !tc.errorExpected && tc.req.Parameters[ParamNfsExportOptions] != "" {
+				instance, err := s.GetShare(context.TODO(), &file.Share{Name: util.ConvertVolToShareName(tc.req.Name)})
+				if err != nil {
+					t.Errorf("test %q failed: couldn't get instance %v: %v", tc.name, tc.req.Name, err)
+					return
+				}
+				for i := range tc.expectedOptions {
+					if !reflect.DeepEqual(instance.NfsExportOptions[i], tc.expectedOptions[i]) {
+						t.Errorf("tc %q failed; nfs export options not equal at index %d: got %+v, expected %+v", tc.name, i, instance.NfsExportOptions[i], tc.expectedOptions[i])
+					}
+				}
 			}
 			if tc.checkOnlyVolidFmt {
 				if !strings.Contains(resp.Volume.VolumeId, modeMultishare) || !strings.Contains(resp.Volume.VolumeId, testShareName) {
@@ -1199,6 +1447,9 @@ func TestMultishareCreateVolumeFromBackup(t *testing.T) {
 		FeatureMultishareBackups: &FeatureMultishareBackups{
 			Enabled: true,
 		},
+		FeatureNFSExportOptionsOnCreate: &FeatureNFSExportOptionsOnCreate{
+			Enabled: true,
+		},
 	}
 
 	defaultBackup := &BackupTestInfo{
@@ -1227,6 +1478,7 @@ func TestMultishareCreateVolumeFromBackup(t *testing.T) {
 		req               *csi.CreateVolumeRequest
 		resp              *csi.CreateVolumeResponse
 		checkOnlyVolidFmt bool
+		expectedOptions   []*file.NfsExportOptions
 		initialBackup     *BackupTestInfo
 		features          *GCFSDriverFeatureOptions
 		errorExpected     bool
@@ -1258,6 +1510,78 @@ func TestMultishareCreateVolumeFromBackup(t *testing.T) {
 			initialBackup:     defaultBackup,
 			checkOnlyVolidFmt: true,
 			errorExpected:     true,
+		},
+		{
+			name: "create volume called with volume content source and nfsExportOptions set",
+			req: &csi.CreateVolumeRequest{
+				Name: testVolName,
+				CapacityRange: &csi.CapacityRange{
+					RequiredBytes: 100 * util.Gb,
+				},
+				Parameters: map[string]string{
+					ParamMultishareInstanceScLabel: testInstanceScPrefix,
+					ParamNfsExportOptions: `[
+						{
+							"accessMode": "READ_WRITE",
+							"ipRanges": [
+								"10.0.0.0/24",
+								"10.124.124.0/28"
+						],
+							"squashMode": "ROOT_SQUASH",
+							"anonUid": "1003",
+							"anonGid": "1003"
+						},
+						{
+							"accessMode": "READ_ONLY",
+							"ipRanges": [
+								"10.0.0.0/28"
+							],
+							"squashMode": "NO_ROOT_SQUASH"
+							}
+					]`,
+				},
+				VolumeCapabilities: volumeCapabilities,
+				VolumeContentSource: &csi.VolumeContentSource{
+					Type: &csi.VolumeContentSource_Snapshot{
+						Snapshot: &csi.VolumeContentSource_SnapshotSource{
+							SnapshotId: "projects/test-project/locations/us-central1/backups/mybackup",
+						},
+					},
+				},
+			},
+			features: features,
+			expectedOptions: []*file.NfsExportOptions{
+				{
+					AccessMode: "READ_WRITE",
+					IpRanges:   []string{"10.0.0.0/24", "10.124.124.0/28"},
+					SquashMode: "ROOT_SQUASH",
+					AnonGid:    1003,
+					AnonUid:    1003,
+				},
+				{
+					AccessMode: "READ_ONLY",
+					IpRanges:   []string{"10.0.0.0/28"},
+					SquashMode: "NO_ROOT_SQUASH",
+				},
+			},
+			resp: &csi.CreateVolumeResponse{
+				Volume: &csi.Volume{
+					CapacityBytes: 100 * util.Gb,
+					VolumeId:      fmt.Sprintf(multishareVolIdFmt, testInstanceScPrefix, testProject, testRegion, testInstanceName1, testShareName),
+					VolumeContext: map[string]string{
+						attrIP: testIP,
+					},
+					ContentSource: &csi.VolumeContentSource{
+						Type: &csi.VolumeContentSource_Snapshot{
+							Snapshot: &csi.VolumeContentSource_SnapshotSource{
+								SnapshotId: "projects/test-project/locations/us-central1/backups/mybackup",
+							},
+						},
+					},
+				},
+			},
+			initialBackup:     defaultBackup,
+			checkOnlyVolidFmt: true,
 		},
 		{
 			name: "create volume called with volume content source, no existing instance or share",
@@ -1611,6 +1935,18 @@ func TestMultishareCreateVolumeFromBackup(t *testing.T) {
 			}
 			if !tc.errorExpected && err != nil {
 				t.Errorf("unexpected error")
+			}
+			if !tc.errorExpected && tc.req.Parameters[ParamNfsExportOptions] != "" {
+				instance, err := s.GetShare(context.TODO(), &file.Share{Name: util.ConvertVolToShareName(tc.req.Name)})
+				if err != nil {
+					t.Errorf("test %q failed: couldn't get instance %v: %v", tc.name, tc.req.Name, err)
+					return
+				}
+				for i := range tc.expectedOptions {
+					if !reflect.DeepEqual(instance.NfsExportOptions[i], tc.expectedOptions[i]) {
+						t.Errorf("tc %q failed; nfs export options not equal at index %d: got %+v, expected %+v", tc.name, i, instance.NfsExportOptions[i], tc.expectedOptions[i])
+					}
+				}
 			}
 			if tc.checkOnlyVolidFmt && !tc.errorExpected {
 				if !strings.Contains(resp.Volume.VolumeId, modeMultishare) || !strings.Contains(resp.Volume.VolumeId, testShareName) {
@@ -2489,6 +2825,7 @@ func TestCreateMultishareSnapshot(t *testing.T) {
 		state  string
 	}
 	backupName := "mybackup"
+	backupName2 := "mybackup2"
 	testInstanceName1 := "fs-" + string(uuid.NewUUID())
 	defaultSourceVolumeID := modeMultishare + "/" + testRegion + "/" + testInstanceName1 + "/" + testShareName
 	defaultBackupUri := fmt.Sprintf("projects/%s/locations/%s/backups/%s", testProject, testRegion, backupName)
@@ -2612,6 +2949,44 @@ func TestCreateMultishareSnapshot(t *testing.T) {
 			},
 			expectErr: true,
 		},
+		{
+			name: "Parameters contain misconfigured labels(invalid KV separator(:) used)",
+			req: &csi.CreateSnapshotRequest{
+				SourceVolumeId: "modeInstance/us-central1/myinstance/myshare",
+				Name:           backupName,
+				Parameters: map[string]string{
+					util.VolumeSnapshotTypeKey: "backup",
+					"labels":                   "key1:value1",
+				},
+			},
+			initialBackup: &BackupTestInfo{
+				backup: &file.BackupInfo{
+					Project:            testProject,
+					Location:           testRegion,
+					SourceInstanceName: testInstanceName1,
+					SourceShare:        testShareName,
+					Name:               backupName,
+					BackupURI:          defaultBackupUri,
+					SourceVolumeId:     modeMultishare + "/" + testRegion + "/" + testInstanceName1 + "/" + testShareName,
+				},
+				state: "CREATING",
+			},
+			expectErr: true,
+		},
+		{
+			name: "adding tags to multishare snapshot fails(failure scenario mocked)",
+			req: &csi.CreateSnapshotRequest{
+				SourceVolumeId: defaultSourceVolumeID,
+				Name:           backupName2,
+				Parameters: map[string]string{
+					util.VolumeSnapshotTypeKey:     "backup",
+					cloud.ParameterKeyResourceTags: "kubernetes/test1/test1",
+				},
+			},
+			features:      features,
+			initialBackup: nil,
+			expectErr:     true,
+		},
 		//Success test cases
 		{
 			name: "No existing backup",
@@ -2656,11 +3031,44 @@ func TestCreateMultishareSnapshot(t *testing.T) {
 				state: "READY",
 			},
 		},
+		{
+			// If the incorrect labels were added, labels processing will not happen for already
+			// existing backup resources.
+			name: "Existing backup found, in state READY. Labels will not be processed.",
+			req: &csi.CreateSnapshotRequest{
+				SourceVolumeId: defaultSourceVolumeID,
+				Name:           backupName,
+				Parameters: map[string]string{
+					util.VolumeSnapshotTypeKey: "backup",
+					"labels":                   "key1:value1",
+				},
+			},
+			features: features,
+			initialBackup: &BackupTestInfo{
+				backup: &file.BackupInfo{
+					Project:            testProject,
+					Location:           testRegion,
+					SourceInstanceName: testInstanceName1,
+					SourceShare:        testShareName,
+					Name:               backupName,
+					BackupURI:          defaultBackupUri,
+					SourceVolumeId:     modeMultishare + "/" + testRegion + "/" + testInstanceName1 + "/" + testShareName,
+				},
+				state: "READY",
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := initTestMultishareControllerWithFeatureOpts(t, tc.features)
 			fileService := m.fileService
+
+			m.tagManager.(*cloud.FakeTagServiceManager).
+				On("AttachResourceTags", context.TODO(), cloud.FilestoreBackUp, backupName, testRegion, tc.req.GetName(), tc.req.GetParameters()).
+				Return(nil)
+			m.tagManager.(*cloud.FakeTagServiceManager).
+				On("AttachResourceTags", context.TODO(), cloud.FilestoreBackUp, backupName2, testRegion, tc.req.GetName(), tc.req.GetParameters()).
+				Return(fmt.Errorf("mock failure: error while adding tags to multishare snapshot"))
 
 			if tc.initialBackup != nil {
 				existingBackup, _ := fileService.CreateBackup(context.TODO(), tc.initialBackup.backup)

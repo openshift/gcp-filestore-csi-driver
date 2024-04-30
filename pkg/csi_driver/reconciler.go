@@ -468,7 +468,7 @@ func (recon *MultishareReconciler) generateNewMultishareInstance(instanceInfo *v
 		case ParamInstanceEncryptionKmsKey:
 			kmsKeyName = v
 		case ParamReservedIPV4CIDR, ParamReservedIPRange:
-
+		case cloud.ParameterKeyResourceTags:
 		case ParamMultishareInstanceScLabel, ParameterKeyLabels, ParameterKeyPVCName, ParameterKeyPVCNamespace, ParameterKeyPVName, paramMultishare:
 		case "csiprovisionersecretname", "csiprovisionersecretnamespace":
 		default:
@@ -485,7 +485,7 @@ func (recon *MultishareReconciler) generateNewMultishareInstance(instanceInfo *v
 		}
 	}
 
-	labels, err := extractInstanceLabels(params, recon.config.Name, recon.config.ClusterName, clusterLocation)
+	labels, err := extractInstanceLabels(params, recon.config.ExtraVolumeLabels, recon.config.Name, recon.config.ClusterName, clusterLocation)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, err.Error())
 	}

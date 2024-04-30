@@ -17,6 +17,8 @@ limitations under the License.
 package driver
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -81,6 +83,7 @@ const (
 	paramMultishare                = "multishare"
 	ParamInstanceEncryptionKmsKey  = "instance-encryption-kms-key"
 	ParamMultishareInstanceScLabel = "instance-storageclass-label"
+	ParamNfsExportOptions          = "nfs-export-options-on-create"
 	paramMaxVolumeSize             = "max-volume-size"
 
 	// Keys for PV and PVC parameters as reported by external-provisioner
@@ -127,6 +130,7 @@ type controllerServerConfig struct {
 	clusterName          string
 	features             *GCFSDriverFeatureOptions
 	extraVolumeLabels    map[string]string
+	tagManager           cloud.TagService
 }
 
 func newControllerServer(config *controllerServerConfig) csi.ControllerServer {
@@ -175,8 +179,13 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		}
 		duration := time.Since(start)
 		s.config.metricsManager.RecordOperationMetrics(err, methodCreateVolume, modeMultishare, duration)
-		klog.Infof("CreateVolume response %+v error %v, for request %+v", response, err, req)
-		return response, err
+
+		if err != nil {
+			klog.Errorf("CreateVolume returned an error %v, for request %+v", err, req)
+			return nil, err
+		}
+		klog.Infof("CreateVolume response %v, for request %+v", response, req)
+		return response, nil
 	}
 
 	klog.V(4).Infof("CreateVolume called with request %+v", req)
@@ -213,7 +222,6 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	}
 	defer s.config.volumeLocks.Release(volumeID)
 
-	sourceSnapshotId := ""
 	if req.GetVolumeContentSource() != nil {
 		if req.GetVolumeContentSource().GetVolume() != nil {
 			return nil, status.Error(codes.InvalidArgument, "Unsupported volume content source")
@@ -230,7 +238,7 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 				klog.Errorf("Failed to get volume %v source snapshot %v: %v", name, id, err.Error())
 				return nil, file.StatusError(err)
 			}
-			sourceSnapshotId = id
+			newFiler.BackupSource = id
 		}
 	}
 
@@ -285,29 +293,26 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		}
 
 		// Add labels.
-		labels, err := extractLabels(param, s.config.driver.config.Name)
+		labels, err := extractLabels(param, s.config.extraVolumeLabels, s.config.driver.config.Name)
 		if err != nil {
 			return nil, file.StatusError(err)
-		}
-		// Append extra lables from the command line option
-		for k, v := range s.config.extraVolumeLabels {
-			labels[k] = v
 		}
 		newFiler.Labels = labels
 
 		// Create the instance
 		var createErr error
-		if sourceSnapshotId != "" {
-			filer, createErr = s.config.fileService.CreateInstanceFromBackupSource(ctx, newFiler, sourceSnapshotId)
-		} else {
-			filer, createErr = s.config.fileService.CreateInstance(ctx, newFiler)
-		}
+		filer, createErr = s.config.fileService.CreateInstance(ctx, newFiler)
 		if createErr != nil {
 			klog.Errorf("Create volume for volume Id %s failed: %v", volumeID, createErr.Error())
 			return nil, file.StatusError(createErr)
 		}
 	}
-	resp := &csi.CreateVolumeResponse{Volume: s.fileInstanceToCSIVolume(filer, modeInstance, sourceSnapshotId)}
+
+	if err := s.config.tagManager.AttachResourceTags(ctx, cloud.FilestoreInstance, filer.Name, filer.Location, req.GetName(), req.GetParameters()); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	resp := &csi.CreateVolumeResponse{Volume: s.fileInstanceToCSIVolume(filer, modeInstance)}
+
 	klog.Infof("CreateVolume succeeded: %+v", resp)
 	return resp, nil
 }
@@ -385,10 +390,11 @@ func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 		}
 		duration := time.Since(start)
 		s.config.metricsManager.RecordOperationMetrics(err, methodDeleteVolume, modeMultishare, duration)
-		klog.Infof("Deletevolume response %+v error %v, for request: %+v", response, err, req)
 		if err != nil {
-			return response, file.StatusError(err)
+			klog.Errorf("Deletevolume returned error %v, for request: %+v", err, req)
+			return nil, file.StatusError(err)
 		}
+		klog.Infof("Deletevolume response %+v, for request: %+v", response, req)
 		return response, nil
 	}
 
@@ -581,6 +587,7 @@ func (s *controllerServer) generateNewFileInstance(name string, capBytes int64, 
 
 	// Set default parameters
 	tier := defaultTier
+	var nfsExportOptions []*file.NfsExportOptions
 	network := defaultNetwork
 	connectMode := directPeering
 	kmsKeyName := ""
@@ -598,6 +605,14 @@ func (s *controllerServer) generateNewFileInstance(name string, capBytes int64, 
 				}
 				location = region
 			}
+		case ParamNfsExportOptions:
+			if s.config.features.FeatureNFSExportOptionsOnCreate == nil || !s.config.features.FeatureNFSExportOptionsOnCreate.Enabled {
+				return nil, fmt.Errorf("nfsExportOptions are disabled")
+			}
+			nfsExportOptions, err = parseNfsExportOptions(v)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse nfs-export-options-on-create %s: %v", v, err)
+			}
 		case paramNetwork:
 			network = v
 		case ParamConnectMode:
@@ -611,6 +626,8 @@ func (s *controllerServer) generateNewFileInstance(name string, capBytes int64, 
 		// It will be used to get unreserved IP in the reserveIPV4Range function
 		// ignore IPRange flag as it will be handled at the same place as cidr
 		case ParamReservedIPV4CIDR, ParamReservedIPRange:
+			continue
+		case cloud.ParameterKeyResourceTags:
 			continue
 		case ParameterKeyLabels, ParameterKeyPVCName, ParameterKeyPVCNamespace, ParameterKeyPVName:
 		case "csiprovisionersecretname", "csiprovisionersecretnamespace":
@@ -631,12 +648,13 @@ func (s *controllerServer) generateNewFileInstance(name string, capBytes int64, 
 			Name:      newInstanceVolume,
 			SizeBytes: capBytes,
 		},
-		KmsKeyName: kmsKeyName,
+		KmsKeyName:       kmsKeyName,
+		NfsExportOptions: nfsExportOptions,
 	}, nil
 }
 
 // fileInstanceToCSIVolume generates a CSI volume spec from the cloud Instance
-func (s *controllerServer) fileInstanceToCSIVolume(instance *file.ServiceInstance, mode, sourceSnapshotId string) *csi.Volume {
+func (s *controllerServer) fileInstanceToCSIVolume(instance *file.ServiceInstance, mode string) *csi.Volume {
 	resp := &csi.Volume{
 		VolumeId:      getVolumeIDFromFileInstance(instance, mode),
 		CapacityBytes: instance.Volume.SizeBytes,
@@ -645,11 +663,11 @@ func (s *controllerServer) fileInstanceToCSIVolume(instance *file.ServiceInstanc
 			attrVolume: instance.Volume.Name,
 		},
 	}
-	if sourceSnapshotId != "" {
+	if instance.BackupSource != "" {
 		contentSource := &csi.VolumeContentSource{
 			Type: &csi.VolumeContentSource_Snapshot{
 				Snapshot: &csi.VolumeContentSource_SnapshotSource{
-					SnapshotId: sourceSnapshotId,
+					SnapshotId: instance.BackupSource,
 				},
 			},
 		}
@@ -683,8 +701,12 @@ func (s *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 		}
 		duration := time.Since(start)
 		s.config.metricsManager.RecordOperationMetrics(err, methodExpandVolume, modeMultishare, duration)
-		klog.Infof("ControllerExpandVolume response %+v error %v, for request: %+v", response, err, req)
-		return response, err
+		if err != nil {
+			klog.Errorf("ControllerExpandVolume returned error %v, for request: %+v", err, req)
+			return nil, err
+		}
+		klog.Infof("ControllerExpandVolume response %+v, for request: %+v", response, req)
+		return response, nil
 	}
 
 	if acquired := s.config.volumeLocks.TryAcquire(volumeID); !acquired {
@@ -818,7 +840,7 @@ func getZoneFromSegment(seg map[string]string) (string, error) {
 	return zone, nil
 }
 
-func extractLabels(parameters map[string]string, driverName string) (map[string]string, error) {
+func extractLabels(parameters, cliLabels map[string]string, driverName string) (map[string]string, error) {
 	labels := make(map[string]string)
 	scLables := make(map[string]string)
 	for k, v := range parameters {
@@ -839,12 +861,12 @@ func extractLabels(parameters map[string]string, driverName string) (map[string]
 	}
 
 	labels[tagKeyCreatedBy] = strings.ReplaceAll(driverName, ".", "_")
-	return mergeLabels(scLables, labels)
+	return mergeLabels(scLables, labels, cliLabels)
 }
 
-func mergeLabels(scLabels map[string]string, metedataLabels map[string]string) (map[string]string, error) {
+func mergeLabels(scLabels, metadataLabels, cliLabels map[string]string) (map[string]string, error) {
 	result := make(map[string]string)
-	for k, v := range metedataLabels {
+	for k, v := range metadataLabels {
 		result[k] = v
 	}
 
@@ -854,6 +876,14 @@ func mergeLabels(scLabels map[string]string, metedataLabels map[string]string) (
 		}
 
 		result[k] = v
+	}
+
+	// add labels from command line with precedence given to
+	// metadata and storage class labels in same order.
+	for k, v := range cliLabels {
+		if _, ok := result[k]; !ok {
+			result[k] = v
+		}
 	}
 
 	return result, nil
@@ -876,8 +906,12 @@ func (s *controllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSn
 		response, err := s.config.multiShareController.CreateSnapshot(ctx, req)
 		duration := time.Since(start)
 		s.config.metricsManager.RecordOperationMetrics(err, methodCreateSnapshot, modeMultishare, duration)
-		klog.Infof("CreateSnapshot response %+v error %v, for request %+v", response, err, req)
-		return response, err
+		if err != nil {
+			klog.Errorf("CreateSnapshot returned error %v, for request %+v", err, req)
+			return nil, err
+		}
+		klog.Infof("CreateSnapshot response %+v, for request %+v", response, req)
+		return response, nil
 	}
 
 	if acquired := s.config.volumeLocks.TryAcquire(volumeID); !acquired {
@@ -912,19 +946,20 @@ func (s *controllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSn
 		return nil, file.StatusError(err)
 	}
 
+	var snapshotResponse *csi.CreateSnapshotResponse
 	if backupExists {
 		// process existing backup
 		snapshot, err := file.ProcessExistingBackup(ctx, existingBackup, volumeID, modeInstance)
 		if err != nil {
 			return nil, err
 		}
-		return &csi.CreateSnapshotResponse{
+		snapshotResponse = &csi.CreateSnapshotResponse{
 			Snapshot: snapshot,
-		}, nil
+		}
 	} else {
 		// create new backup
 
-		labels, err := extractBackupLabels(req.GetParameters(), s.config.driver.config.Name, req.Name)
+		labels, err := extractBackupLabels(req.GetParameters(), s.config.extraVolumeLabels, s.config.driver.config.Name, req.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -939,7 +974,7 @@ func (s *controllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSn
 		if err != nil {
 			return nil, file.StatusError(err)
 		}
-		resp := &csi.CreateSnapshotResponse{
+		snapshotResponse = &csi.CreateSnapshotResponse{
 			Snapshot: &csi.Snapshot{
 				SizeBytes:      util.GbToBytes(backupObj.CapacityGb),
 				SnapshotId:     backupObj.Name,
@@ -949,13 +984,17 @@ func (s *controllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSn
 			},
 		}
 		klog.V(4).Infof("CreateSnapshot succeeded for volume %v, Backup Id: %v", volumeID, backupObj.Name)
-		return resp, nil
 	}
 
+	if err := s.config.tagManager.AttachResourceTags(ctx, cloud.FilestoreBackUp, backupInfo.Name, backupInfo.Location, req.GetName(), req.GetParameters()); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+
+	return snapshotResponse, nil
 }
 
-func extractBackupLabels(parameters map[string]string, driverName string, snapshotName string) (map[string]string, error) {
-	labels, err := extractLabels(parameters, driverName)
+func extractBackupLabels(parameters, cliLabels map[string]string, driverName string, snapshotName string) (map[string]string, error) {
+	labels, err := extractLabels(parameters, cliLabels, driverName)
 	if err != nil {
 		return nil, err
 	}
@@ -1000,4 +1039,22 @@ func (s *controllerServer) DeleteSnapshot(ctx context.Context, req *csi.DeleteSn
 	}
 
 	return &csi.DeleteSnapshotResponse{}, nil
+}
+
+func parseNfsExportOptions(optionsString string) ([]*file.NfsExportOptions, error) {
+	if optionsString == "" {
+		return nil, nil
+	}
+	var parsedOptions []*file.NfsExportOptions
+	err := strictUnmarshal([]byte(optionsString), &parsedOptions)
+	if err != nil {
+		return nil, err
+	}
+	return parsedOptions, nil
+}
+
+func strictUnmarshal(data []byte, v interface{}) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
 }
