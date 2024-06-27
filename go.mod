@@ -8,6 +8,7 @@ require (
 	github.com/golang/protobuf v1.5.4
 	github.com/google/go-cmp v0.6.0
 	github.com/google/uuid v1.3.0
+	github.com/googleapis/gax-go/v2 v2.12.0
 	github.com/kubernetes-csi/csi-lib-utils v0.13.0
 	github.com/kubernetes-csi/csi-test/v3 v3.1.1
 	github.com/onsi/ginkgo v1.16.5
@@ -54,7 +55,6 @@ require (
 	github.com/google/gofuzz v1.2.0 // indirect
 	github.com/google/s2a-go v0.1.7 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.2.5 // indirect
-	github.com/googleapis/gax-go/v2 v2.12.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.0 // indirect
 	github.com/imdario/mergo v0.3.13 // indirect
@@ -109,6 +109,8 @@ replace (
 	k8s.io/controller-manager => k8s.io/controller-manager v0.29.4
 	k8s.io/cri-api => k8s.io/cri-api v0.29.4
 	k8s.io/csi-translation-lib => k8s.io/csi-translation-lib v0.29.4
+	k8s.io/dynamic-resource-allocation => k8s.io/dynamic-resource-allocation v0.29.4
+	k8s.io/endpointslice => k8s.io/endpointslice v0.29.4
 	k8s.io/kube-aggregator => k8s.io/kube-aggregator v0.29.4
 	k8s.io/kube-controller-manager => k8s.io/kube-controller-manager v0.29.4
 	k8s.io/kube-proxy => k8s.io/kube-proxy v0.29.4
