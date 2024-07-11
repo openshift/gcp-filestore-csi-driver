@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/googleapis/gax-go/v2/apierror"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
@@ -50,15 +51,23 @@ type PollOpts struct {
 	Interval time.Duration
 	Timeout  time.Duration
 }
+type NfsExportOptions struct {
+	AccessMode string   `json:"accessMode,omitempty"`
+	AnonGid    int64    `json:"anonGid,omitempty,string"`
+	AnonUid    int64    `json:"anonUid,omitempty,string"`
+	IpRanges   []string `json:"ipRanges,omitempty"`
+	SquashMode string   `json:"squashMode,omitempty"`
+}
 
 type Share struct {
-	Name           string              // only the share name
-	Parent         *MultishareInstance // parent captures the project, location details.
-	State          string
-	MountPointName string
-	Labels         map[string]string
-	CapacityBytes  int64
-	BackupId       string
+	Name             string              // only the share name
+	Parent           *MultishareInstance // parent captures the project, location details.
+	State            string
+	MountPointName   string
+	Labels           map[string]string
+	CapacityBytes    int64
+	BackupId         string
+	NfsExportOptions []*NfsExportOptions
 }
 
 type MultishareInstance struct {
@@ -88,15 +97,17 @@ type ListFilter struct {
 }
 
 type ServiceInstance struct {
-	Project    string
-	Name       string
-	Location   string
-	Tier       string
-	Network    Network
-	Volume     Volume
-	Labels     map[string]string
-	State      string
-	KmsKeyName string
+	Project          string
+	Name             string
+	Location         string
+	Tier             string
+	Network          Network
+	Volume           Volume
+	Labels           map[string]string
+	State            string
+	KmsKeyName       string
+	BackupSource     string
+	NfsExportOptions []*NfsExportOptions
 }
 
 type Volume struct {
@@ -154,7 +165,6 @@ type Service interface {
 	GetBackup(ctx context.Context, backupUri string) (*Backup, error)
 	CreateBackup(ctx context.Context, backupInfo *BackupInfo) (*filev1beta1.Backup, error)
 	DeleteBackup(ctx context.Context, backupId string) error
-	CreateInstanceFromBackupSource(ctx context.Context, obj *ServiceInstance, volumeSourceSnapshotId string) (*ServiceInstance, error)
 	HasOperations(ctx context.Context, obj *ServiceInstance, operationType string, done bool) (bool, error)
 	// Multishare ops
 	GetMultishareInstance(ctx context.Context, obj *MultishareInstance) (*MultishareInstance, error)
@@ -206,6 +216,14 @@ var (
 	shareUriRegex    = regexp.MustCompile(`^projects/([^/]+)/locations/([^/]+)/instances/([^/]+)/shares/([^/]+)$`)
 )
 
+// userErrorCodeMap tells how API error types are translated to error codes.
+var userErrorCodeMap = map[int]codes.Code{
+	http.StatusForbidden:       codes.PermissionDenied,
+	http.StatusBadRequest:      codes.InvalidArgument,
+	http.StatusTooManyRequests: codes.ResourceExhausted,
+	http.StatusNotFound:        codes.NotFound,
+}
+
 func NewGCFSService(version string, client *http.Client, primaryFilestoreServiceEndpoint, testFilestoreServiceEndpoint string) (Service, error) {
 	ctx := context.Background()
 
@@ -251,64 +269,14 @@ func NewGCFSService(version string, client *http.Client, primaryFilestoreService
 }
 
 func (manager *gcfsServiceManager) CreateInstance(ctx context.Context, obj *ServiceInstance) (*ServiceInstance, error) {
-	betaObj := &filev1beta1.Instance{
-		Tier: obj.Tier,
-		FileShares: []*filev1beta1.FileShareConfig{
-			{
-				Name:       obj.Volume.Name,
-				CapacityGb: util.RoundBytesToGb(obj.Volume.SizeBytes),
-			},
-		},
-		Networks: []*filev1beta1.NetworkConfig{
-			{
-				Network:         obj.Network.Name,
-				Modes:           []string{"MODE_IPV4"},
-				ReservedIpRange: obj.Network.ReservedIpRange,
-				ConnectMode:     obj.Network.ConnectMode,
-			},
-		},
-		KmsKeyName: obj.KmsKeyName,
-		Labels:     obj.Labels,
-	}
-
-	klog.V(4).Infof("Creating instance %q: location %q, tier %q, capacity %v, network %q, ipRange %q, connectMode %q, KmsKeyName %q, labels %v",
-		obj.Name,
-		obj.Location,
-		betaObj.Tier,
-		betaObj.FileShares[0].CapacityGb,
-		betaObj.Networks[0].Network,
-		betaObj.Networks[0].ReservedIpRange,
-		betaObj.Networks[0].ConnectMode,
-		betaObj.KmsKeyName,
-		betaObj.Labels)
-	op, err := manager.instancesService.Create(locationURI(obj.Project, obj.Location), betaObj).InstanceId(obj.Name).Context(ctx).Do()
-	if err != nil {
-		klog.Errorf("CreateInstance operation failed for instance %s: %w", obj.Name, err)
-		return nil, err
-	}
-
-	klog.V(4).Infof("For instance %v, waiting for create instance op %v to complete", obj.Name, op.Name)
-	err = manager.waitForOp(ctx, op)
-	if err != nil {
-		klog.Errorf("WaitFor CreateInstance op %s failed: %w", op.Name, err)
-		return nil, err
-	}
-	instance, err := manager.GetInstance(ctx, obj)
-	if err != nil {
-		klog.Errorf("failed to get instance after creation: %w", err)
-		return nil, err
-	}
-	return instance, nil
-}
-
-func (manager *gcfsServiceManager) CreateInstanceFromBackupSource(ctx context.Context, obj *ServiceInstance, sourceSnapshotId string) (*ServiceInstance, error) {
 	instance := &filev1beta1.Instance{
 		Tier: obj.Tier,
 		FileShares: []*filev1beta1.FileShareConfig{
 			{
-				Name:         obj.Volume.Name,
-				CapacityGb:   util.RoundBytesToGb(obj.Volume.SizeBytes),
-				SourceBackup: sourceSnapshotId,
+				Name:             obj.Volume.Name,
+				CapacityGb:       util.RoundBytesToGb(obj.Volume.SizeBytes),
+				SourceBackup:     obj.BackupSource,
+				NfsExportOptions: extractNfsShareExportOptions(obj.NfsExportOptions),
 			},
 		},
 		Networks: []*filev1beta1.NetworkConfig{
@@ -337,19 +305,19 @@ func (manager *gcfsServiceManager) CreateInstanceFromBackupSource(ctx context.Co
 		instance.FileShares[0].SourceBackup)
 	op, err := manager.instancesService.Create(locationURI(obj.Project, obj.Location), instance).InstanceId(obj.Name).Context(ctx).Do()
 	if err != nil {
-		klog.Errorf("CreateInstance operation failed for instance %v: %w", obj.Name, err)
+		klog.Errorf("CreateInstance operation failed for instance %v: %v", obj.Name, err)
 		return nil, err
 	}
 
 	klog.V(4).Infof("For instance %v, waiting for create instance op %v to complete", obj.Name, op.Name)
 	err = manager.waitForOp(ctx, op)
 	if err != nil {
-		klog.Errorf("WaitFor CreateInstance op %s failed: %w", op.Name, err)
+		klog.Errorf("WaitFor CreateInstance op %s failed: %v", op.Name, err)
 		return nil, err
 	}
 	serviceInstance, err := manager.GetInstance(ctx, obj)
 	if err != nil {
-		klog.Errorf("failed to get instance after creation: %w", err)
+		klog.Errorf("failed to get instance after creation: %v", err)
 		return nil, err
 	}
 	return serviceInstance, nil
@@ -394,9 +362,10 @@ func cloudInstanceToServiceInstance(instance *filev1beta1.Instance) (*ServiceIns
 			ReservedIpRange: instance.Networks[0].ReservedIpRange,
 			ConnectMode:     instance.Networks[0].ConnectMode,
 		},
-		KmsKeyName: instance.KmsKeyName,
-		Labels:     instance.Labels,
-		State:      instance.State,
+		KmsKeyName:   instance.KmsKeyName,
+		Labels:       instance.Labels,
+		State:        instance.State,
+		BackupSource: instance.FileShares[0].SourceBackup,
 	}, nil
 }
 
@@ -557,7 +526,7 @@ func (manager *gcfsServiceManager) CreateBackup(ctx context.Context, backupInfo 
 	opbackup, err := manager.backupService.Create(locationURI(backupInfo.Project, backupInfo.Location), backupobj).BackupId(backupInfo.Name).Context(ctx).Do()
 
 	if err != nil {
-		klog.Errorf("Create Backup operation failed: %w", err)
+		klog.Errorf("Create Backup operation failed: %v", err)
 		return nil, err
 	}
 
@@ -671,7 +640,7 @@ func IsNotFoundErr(err error) bool {
 // (2) http 403 Forbidden, returns grpc PermissionDenied,
 // (3) http 404 Not Found, returns grpc NotFound
 // (4) http 429 Too Many Requests, returns grpc ResourceExhausted
-func isUserError(err error) *codes.Code {
+func isUserOperationError(err error) *codes.Code {
 	// Upwrap the error
 	var apiErr *googleapi.Error
 	if !errors.As(err, &apiErr) {
@@ -679,15 +648,6 @@ func isUserError(err error) *codes.Code {
 		return containsUserErrStr(err)
 	}
 
-	userErrors := map[int]codes.Code{
-		http.StatusForbidden:       codes.PermissionDenied,
-		http.StatusBadRequest:      codes.InvalidArgument,
-		http.StatusTooManyRequests: codes.ResourceExhausted,
-		http.StatusNotFound:        codes.NotFound,
-	}
-	if code, ok := userErrors[apiErr.Code]; ok {
-		return &code
-	}
 	return nil
 }
 
@@ -732,14 +692,50 @@ func isContextError(err error) *codes.Code {
 
 // existingErrorCode returns a pointer to the grpc error code for the passed in error.
 // Returns nil if the error is nil, or if the error cannot be converted to a grpc status.
+// Since github.com/googleapis/gax-go/v2/apierror now wraps googleapi errors (returned from
+// GCE API calls), and sets their status error code to Unknown, we now have to make sure we
+// only return existing error codes from errors that do not wrap googleAPI errors. Otherwise,
+// we will return Unknown for all GCE API calls that return googleapi errors.
 func existingErrorCode(err error) *codes.Code {
 	if err == nil {
 		return nil
 	}
 
-	if status, ok := status.FromError(err); ok {
-		return util.ErrCodePtr(status.Code())
+	// We want to make sure we catch other error types that are statusable.
+	// (eg. grpc-go/internal/status/status.go Error struct that wraps a status)
+	var googleErr *googleapi.Error
+	if !errors.As(err, &googleErr) {
+		if status, ok := status.FromError(err); ok {
+			return util.ErrCodePtr(status.Code())
+		}
 	}
+	return nil
+}
+
+// isGoogleAPIError returns the gRPC status code for the given googleapi error by mapping
+// the googleapi error's HTTP code to the corresponding gRPC error code. If the error is
+// wrapped in an APIError (github.com/googleapis/gax-go/v2/apierror), it maps the wrapped
+// googleAPI error's HTTP code to the corresponding gRPC error code. Returns an error if
+// the given error is not a googleapi error.
+func isGoogleAPIError(err error) *codes.Code {
+	var googleErr *googleapi.Error
+	if !errors.As(err, &googleErr) {
+		return nil
+	}
+	var sourceCode int
+	var apiErr *apierror.APIError
+	if errors.As(err, &apiErr) {
+		// When googleapi.Err is used as a wrapper, we return the error code of the wrapped contents.
+		sourceCode = apiErr.HTTPCode()
+	} else {
+		// Rely on error code in googleapi.Err when it is our primary error.
+		sourceCode = googleErr.Code
+	}
+	// Map API error code to user error code.
+	if code, ok := userErrorCodeMap[sourceCode]; ok {
+		return util.ErrCodePtr(code)
+	}
+	// Map API error code to user error code.
 	return nil
 }
 
@@ -761,10 +757,13 @@ func codeForError(err error) *codes.Code {
 	if errCode := existingErrorCode(err); errCode != nil {
 		return errCode
 	}
-	if errCode := isUserError(err); errCode != nil {
+	if errCode := isUserOperationError(err); errCode != nil {
 		return errCode
 	}
 	if errCode := isContextError(err); errCode != nil {
+		return errCode
+	}
+	if errCode := isGoogleAPIError(err); errCode != nil {
 		return errCode
 	}
 
@@ -1006,10 +1005,11 @@ func (manager *gcfsServiceManager) StartResizeMultishareInstanceOp(ctx context.C
 func (manager *gcfsServiceManager) StartCreateShareOp(ctx context.Context, share *Share) (*filev1beta1multishare.Operation, error) {
 	instanceuri := instanceURI(share.Parent.Project, share.Parent.Location, share.Parent.Name)
 	targetshare := &filev1beta1multishare.Share{
-		CapacityGb: util.BytesToGb(share.CapacityBytes),
-		Labels:     share.Labels,
-		MountName:  share.MountPointName,
-		Backup:     share.BackupId,
+		CapacityGb:       util.BytesToGb(share.CapacityBytes),
+		Labels:           share.Labels,
+		MountName:        share.MountPointName,
+		Backup:           share.BackupId,
+		NfsExportOptions: extractNfsShareExportOptions(share.NfsExportOptions),
 	}
 
 	op, err := manager.multishareInstancesSharesService.Create(instanceuri, targetshare).ShareId(share.Name).Context(ctx).Do()
@@ -1325,4 +1325,19 @@ func GenerateShareURI(s *Share) (string, error) {
 
 func isMultishareVolId(volId string) bool {
 	return strings.Contains(volId, "modeMultishare")
+}
+
+func extractNfsShareExportOptions(options []*NfsExportOptions) []*filev1beta1multishare.NfsExportOptions {
+	var filerOpts []*filev1beta1multishare.NfsExportOptions
+	for _, opt := range options {
+		filerOpts = append(filerOpts,
+			&filev1beta1multishare.NfsExportOptions{
+				AccessMode: opt.AccessMode,
+				AnonGid:    opt.AnonGid,
+				AnonUid:    opt.AnonUid,
+				IpRanges:   opt.IpRanges,
+				SquashMode: opt.SquashMode,
+			})
+	}
+	return filerOpts
 }
