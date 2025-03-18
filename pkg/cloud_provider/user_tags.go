@@ -154,11 +154,11 @@ func (src *resourceTags) removeDuplicateTags() {
 
 // mergeTags merges tags from src to dst and removes
 // duplicate tags in dst after merge.
-func (src *resourceTags) mergeTags(dst *resourceTags) {
+func (src resourceTags) mergeTags(dst *resourceTags) {
 	if *dst == nil {
 		*dst = make(resourceTags)
 	}
-	for k, v := range *src {
+	for k, v := range src {
 		(*dst)[k] = v
 	}
 	dst.removeDuplicateTags()
@@ -177,11 +177,11 @@ func NewTagManager(cloud *Cloud, opts ...TagServiceOptions) TagService {
 // TagService arguments.
 func (t *tagServiceManager) parseTagServiceOptions(opts []TagServiceOptions) {
 	for _, opt := range opts {
-		switch val := opt.(type) {
+		switch opt.(type) {
 		case resourceTags:
-			t.tags = val
+			t.tags = opt.(resourceTags)
 		case *http.Client:
-			t.httpClient = val
+			t.httpClient = opt.(*http.Client)
 		case withoutAuthentication:
 			t.withoutAuthentication = true
 		}

@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/gcp-filestore-csi-driver/pkg/common"
 	"sigs.k8s.io/gcp-filestore-csi-driver/pkg/util"
 
 	filev1beta1 "google.golang.org/api/file/v1beta1"
@@ -84,6 +85,7 @@ type MultishareInstance struct {
 	KmsKeyName         string
 	Description        string
 	MaxShareCount      int
+	Protocol           string
 }
 
 func (i *MultishareInstance) String() string {
@@ -108,6 +110,7 @@ type ServiceInstance struct {
 	KmsKeyName       string
 	BackupSource     string
 	NfsExportOptions []*NfsExportOptions
+	Protocol         string
 }
 
 type Volume struct {
@@ -123,9 +126,10 @@ type Network struct {
 }
 
 type Backup struct {
-	Backup         *filev1beta1.Backup
-	SourceInstance string
-	SourceShare    string
+	Backup            *filev1beta1.Backup
+	SourceInstance    string
+	SourceShare       string
+	FileSystemProtocl string
 }
 
 type BackupInfo struct {
@@ -290,9 +294,10 @@ func (manager *gcfsServiceManager) CreateInstance(ctx context.Context, obj *Serv
 		KmsKeyName: obj.KmsKeyName,
 		Labels:     obj.Labels,
 		State:      obj.State,
+		Protocol:   obj.Protocol,
 	}
 
-	klog.V(4).Infof("Creating instance %q: location %v, tier %q, capacity %v, network %q, ipRange %q, connectMode %q, KmsKeyName %q, labels %v backup source %q",
+	klog.V(4).Infof("Creating instance %q: location %v, tier %q, capacity %v, network %q, ipRange %q, connectMode %q, KmsKeyName %q, labels %v, backup source %q, protocol %v",
 		obj.Name,
 		obj.Location,
 		instance.Tier,
@@ -302,7 +307,8 @@ func (manager *gcfsServiceManager) CreateInstance(ctx context.Context, obj *Serv
 		instance.Networks[0].ConnectMode,
 		instance.KmsKeyName,
 		instance.Labels,
-		instance.FileShares[0].SourceBackup)
+		instance.FileShares[0].SourceBackup,
+		obj.Protocol)
 	op, err := manager.instancesService.Create(locationURI(obj.Project, obj.Location), instance).InstanceId(obj.Name).Context(ctx).Do()
 	if err != nil {
 		klog.Errorf("CreateInstance operation failed for instance %v: %v", obj.Name, err)
@@ -313,7 +319,7 @@ func (manager *gcfsServiceManager) CreateInstance(ctx context.Context, obj *Serv
 	err = manager.waitForOp(ctx, op)
 	if err != nil {
 		klog.Errorf("WaitFor CreateInstance op %s failed: %v", op.Name, err)
-		return nil, err
+		return nil, common.NewTemporaryError(codes.Unavailable, fmt.Errorf("unknown error when polling the operation: %w", err))
 	}
 	serviceInstance, err := manager.GetInstance(ctx, obj)
 	if err != nil {
@@ -328,14 +334,17 @@ func (manager *gcfsServiceManager) GetInstance(ctx context.Context, obj *Service
 	instance, err := manager.instancesService.Get(instanceUri).Context(ctx).Do()
 	if err != nil {
 		klog.Errorf("Failed to get instance %v", instanceUri)
-		return nil, err
+		if IsNotFoundErr(err) {
+			return nil, err
+		}
+		return nil, common.NewTemporaryError(codes.Unavailable, err)
 	}
 
 	if instance != nil {
 		klog.V(4).Infof("GetInstance call fetched instance %+v", instance)
 		return cloudInstanceToServiceInstance(instance)
 	}
-	return nil, fmt.Errorf("failed to get instance %v", instanceUri)
+	return nil, common.NewTemporaryError(codes.Unavailable, fmt.Errorf("failed to get instance %v", instanceUri))
 }
 
 func cloudInstanceToServiceInstance(instance *filev1beta1.Instance) (*ServiceInstance, error) {
@@ -366,6 +375,7 @@ func cloudInstanceToServiceInstance(instance *filev1beta1.Instance) (*ServiceIns
 		Labels:       instance.Labels,
 		State:        instance.State,
 		BackupSource: instance.FileShares[0].SourceBackup,
+		Protocol:     instance.Protocol,
 	}, nil
 }
 
@@ -509,9 +519,10 @@ func (manager *gcfsServiceManager) GetBackup(ctx context.Context, backupUri stri
 		return nil, err
 	}
 	return &Backup{
-		Backup:         backup,
-		SourceInstance: backup.SourceInstance,
-		SourceShare:    backup.SourceFileShare,
+		Backup:            backup,
+		SourceInstance:    backup.SourceInstance,
+		SourceShare:       backup.SourceFileShare,
+		FileSystemProtocl: backup.FileSystemProtocol,
 	}, nil
 }
 
@@ -714,6 +725,13 @@ func existingErrorCode(err error) *codes.Code {
 		return nil
 	}
 
+	var te *common.TemporaryError
+	// explicitly check if the error type is a `common.TemporaryError`.
+	if errors.As(err, &te) {
+		if status, ok := status.FromError(err); ok {
+			return util.ErrCodePtr(status.Code())
+		}
+	}
 	// We want to make sure we catch other error types that are statusable.
 	// (eg. grpc-go/internal/status/status.go Error struct that wraps a status)
 	var googleErr *googleapi.Error
@@ -979,6 +997,7 @@ func (manager *gcfsServiceManager) StartCreateMultishareInstanceOp(ctx context.C
 		Labels:        instance.Labels,
 		Description:   instance.Description,
 		MaxShareCount: int64(instance.MaxShareCount),
+		Protocol:      instance.Protocol,
 	}
 
 	op, err := manager.multishareInstancesService.Create(locationURI(instance.Project, instance.Location), targetinstance).InstanceId(instance.Name).Context(ctx).Do()
@@ -1008,6 +1027,7 @@ func (manager *gcfsServiceManager) StartResizeMultishareInstanceOp(ctx context.C
 		KmsKeyName:        obj.KmsKeyName,
 		Labels:            obj.Labels,
 		Description:       obj.Description,
+		Protocol:          obj.Protocol,
 	}
 	op, err := manager.multishareInstancesService.Patch(instanceuri, targetinstance).UpdateMask(multishareCapacityUpdateMask).Context(ctx).Do()
 	if err != nil {
@@ -1030,7 +1050,7 @@ func (manager *gcfsServiceManager) StartCreateShareOp(ctx context.Context, share
 
 	op, err := manager.multishareInstancesSharesService.Create(instanceuri, targetshare).ShareId(share.Name).Context(ctx).Do()
 	if err != nil {
-		return nil, fmt.Errorf("CreateShare operation failed: %w", err)
+		return nil, common.NewTemporaryError(codes.Unavailable, fmt.Errorf("CreateShare operation failed: %w", err))
 	}
 	klog.Infof("Started Create Share op %s for share %q instance uri %q, with capacity(GB) %v, Labels %v", op.Name, share.Name, instanceuri, targetshare.CapacityGb, targetshare.Labels)
 	return op, nil
@@ -1082,7 +1102,7 @@ func (manager *gcfsServiceManager) GetOp(ctx context.Context, op string) (*filev
 func (manager *gcfsServiceManager) GetShare(ctx context.Context, obj *Share) (*Share, error) {
 	sobj, err := manager.multishareInstancesSharesService.Get(shareURI(obj.Parent.Project, obj.Parent.Location, obj.Parent.Name, obj.Name)).Context(ctx).Do()
 	if err != nil {
-		return nil, err
+		return nil, common.NewTemporaryError(codes.Unavailable, err)
 	}
 
 	_, _, _, shareName, err := util.ParseShareURI(sobj.Name)
@@ -1091,7 +1111,7 @@ func (manager *gcfsServiceManager) GetShare(ctx context.Context, obj *Share) (*S
 	}
 	instance, err := manager.GetMultishareInstance(ctx, obj.Parent)
 	if err != nil {
-		return nil, err
+		return nil, common.NewTemporaryError(codes.Unavailable, err)
 	}
 
 	return &Share{
@@ -1127,7 +1147,6 @@ func (manager *gcfsServiceManager) ListShares(ctx context.Context, filter *ListF
 				klog.Errorf("Failed to parse share url :%s", sobj.Name)
 				return nil, err
 			}
-
 			s := &Share{
 				Name: shareName,
 				Parent: &MultishareInstance{

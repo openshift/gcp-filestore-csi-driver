@@ -37,35 +37,27 @@ var (
 	registriesLock      sync.RWMutex
 	disabledMetrics     = map[string]struct{}{}
 
-	registeredMetricsTotal = NewCounterVec(
+	registeredMetrics = NewCounterVec(
 		&CounterOpts{
-			Name:           "registered_metrics_total",
+			Name:           "registered_metric_total",
 			Help:           "The count of registered metrics broken by stability level and deprecation version.",
-			StabilityLevel: BETA,
+			StabilityLevel: ALPHA,
 		},
 		[]string{"stability_level", "deprecated_version"},
 	)
 
 	disabledMetricsTotal = NewCounter(
 		&CounterOpts{
-			Name:           "disabled_metrics_total",
+			Name:           "disabled_metric_total",
 			Help:           "The count of disabled metrics.",
-			StabilityLevel: BETA,
+			StabilityLevel: ALPHA,
 		},
 	)
 
 	hiddenMetricsTotal = NewCounter(
 		&CounterOpts{
-			Name:           "hidden_metrics_total",
+			Name:           "hidden_metric_total",
 			Help:           "The count of hidden metrics.",
-			StabilityLevel: BETA,
-		},
-	)
-
-	cardinalityEnforcementUnexpectedCategorizationsTotal = NewCounter(
-		&CounterOpts{
-			Name:           "cardinality_enforcement_unexpected_categorizations_total",
-			Help:           "The count of unexpected categorizations during cardinality enforcement.",
 			StabilityLevel: ALPHA,
 		},
 	)
@@ -165,10 +157,6 @@ type KubeRegistry interface {
 	Reset()
 	// RegisterMetaMetrics registers metrics about the number of registered metrics.
 	RegisterMetaMetrics()
-	// Registerer exposes the underlying prometheus registerer
-	Registerer() prometheus.Registerer
-	// Gatherer exposes the underlying prometheus gatherer
-	Gatherer() prometheus.Gatherer
 }
 
 // kubeRegistry is a wrapper around a prometheus registry-type object. Upon initialization
@@ -198,16 +186,6 @@ func (kr *kubeRegistry) Register(c Registerable) error {
 
 	kr.trackHiddenCollector(c)
 	return nil
-}
-
-// Registerer exposes the underlying prometheus.Registerer
-func (kr *kubeRegistry) Registerer() prometheus.Registerer {
-	return kr.PromRegistry
-}
-
-// Gatherer exposes the underlying prometheus.Gatherer
-func (kr *kubeRegistry) Gatherer() prometheus.Gatherer {
-	return kr.PromRegistry
 }
 
 // MustRegister works like Register but registers any number of
@@ -387,8 +365,7 @@ func NewKubeRegistry() KubeRegistry {
 }
 
 func (r *kubeRegistry) RegisterMetaMetrics() {
-	r.MustRegister(registeredMetricsTotal)
+	r.MustRegister(registeredMetrics)
 	r.MustRegister(disabledMetricsTotal)
 	r.MustRegister(hiddenMetricsTotal)
-	r.MustRegister(cardinalityEnforcementUnexpectedCategorizationsTotal)
 }

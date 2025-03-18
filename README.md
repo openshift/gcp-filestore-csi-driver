@@ -14,63 +14,18 @@ dynamically created and mounted by workloads.
 ## Project Status
 Status: GA
 
-Latest image: `registry.k8s.io/cloud-provider-gcp/gcp-filestore-csi-driver:v1.5.3`
+Latest image: `registry.k8s.io/cloud-provider-gcp/gcp-filestore-csi-driver:v1.7.0`
 
 Also see [known issues](KNOWN_ISSUES.md) and [CHANGELOG](CHANGELOG.md).
-
-### CSI Compatibility
-This plugin is compatible with CSI version 1.3.0.
-
-### Kubernetes Compatibility
-The following table captures the compatibility matrix of the core filestore driver binary
-`registry.k8s.io/cloud-provider-gcp/gcp-filestore-csi-driver`
-
-| Filestore CSI Driver\Kubernetes Version | 1.16 | 1.17+ |
-| --------------------------------------- | ---- | ----- |
-| v0.2.0 (alpha)                          |  no  |  no   |
-| v0.3.1 (beta)                           |  yes |  yes  |
-| v0.4.0 (beta)                           |  yes |  yes  |
-| v0.5.0 (beta)                           |  yes |  yes  |
-| v0.6.0 (beta)                           |  yes |  yes  |
-| v0.6.1 (beta)                           |  yes |  yes  |
-| v1.0.0 (GA)                             |  yes |  yes  |
-| v1.1.1 (GA)                             |  yes |  yes  |
-| v1.1.2 (GA)                             |  yes |  yes  |
-| v1.1.3 (GA)                             |  yes |  yes  |
-| v1.1.4 (GA)                             |  yes |  yes  |
-| v1.2.0 (GA)                             |  yes |  yes  |
-| v1.2.1 (GA)                             |  yes |  yes  |
-| v1.2.2 (GA)                             |  yes |  yes  |
-| v1.2.3 (GA)                             |  yes |  yes  |
-| v1.2.4 (GA)                             |  yes |  yes  |
-| v1.2.5 (GA)                             |  yes |  yes  |
-| v1.2.7 (GA)                             |  yes |  yes  |
-| v1.3.0 (GA)                             |  yes |  yes  |
-| v1.3.1 (GA)                             |  yes |  yes  |
-| v1.3.2 (GA)                             |  yes |  yes  |
-| v1.3.4 (GA)                             |  yes |  yes  |
-| v1.3.5 (GA)                             |  yes |  yes  |
-| v1.3.9 (GA)                             |  yes |  yes  |
-| v1.3.10 (GA)                            |  yes |  yes  |
-| v1.3.11 (GA)                            |  yes |  yes  |
-| v1.3.12 (GA)                            |  yes |  yes  |
-| v1.3.13 (GA)                            |  yes |  yes  |
-| v1.3.14 (GA)                            |  yes |  yes  |
-| v1.4.1 (GA)                             |  yes |  yes  |
-| v1.4.2 (GA)                             |  yes |  yes  |
-| v1.4.3 (GA)                             |  yes |  yes  |
-| v1.4.4 (GA)                             |  yes |  yes  |
-| v1.4.5 (GA)                             |  yes |  yes  |
-| v1.5.0 (GA)                             |  yes |  yes  |
-| v1.5.2 (GA)                             |  yes |  yes  |
-| v1.5.3 (GA)                             |  yes |  yes  |
-| master                                  |  yes |  yes  |
 
 The manifest bundle which captures all the driver components (driver pod which includes the containers csi-external-provisioner, csi-external-resizer, csi-external-snapshotter, gcp-filestore-driver, csi-driver-registrar, csi driver object, rbacs, pod security policies etc) can be picked up from the master branch [overlays](deploy/kubernetes/overlays) directory. We structure the overlays directory per minor version of kubernetes because not all driver components can be used with all kubernetes versions. For example volume snapshots are supported 1.17+ kubernetes versions thus [stable-1-16](deploy/kubernetes/overlays/stable-1-16) driver manifests does not contain the snapshotter sidecar. Read more about overlays [here](docs/release/overlays.md).
 
 Example:
 `stable-1-19` overlays bundle can be used to deploy all the components of the driver on kubernetes 1.19.
 `stable-master` overlays bundle can be used to deploy all the components of the driver on kubernetes master.
+
+### CSI Compatibility
+This plugin is compatible with CSI version 1.3.0.
 
 ## Plugin Features
 
@@ -80,7 +35,7 @@ volume. Customizable parameters for volume creation include:
 
 | Parameter         | Values                  | Default                                | Description |
 | ---------------   | ----------------------- |-----------                             | ----------- |
-| tier              | "standard"<br>"premium"<br>"enterprise" | "standard"             | storage performance tier |
+| tier              | "standard"/"basic_hdd"<br>"premium"/"basic_ssd"<br>"enterprise"<br>"high_scale_ssd"/"zonal" | "standard"             | storage performance tier |
 | network           | string                  | "default"                              | VPC name.<br>When using "PRIVATE_SERVICE_ACCESS" connect-mode, network needs to be the full VPC name. |
 | reserved-ipv4-cidr| string		              | ""                                     | CIDR range to allocate Filestore IP Ranges from.<br>The CIDR must be large enough to accommodate multiple Filestore IP Ranges of /29 each, /26 if enterprise tier is used. |
 | reserved-ip-range | string		              | ""                                     | IP range to allocate Filestore IP Ranges from.<br>This flag is used instead of "reserved-ipv4-cidr" when "connect-mode" is set to "PRIVATE_SERVICE_ACCESS" and the value must be an [allocated IP address range](https://cloud.google.com/compute/docs/ip-addresses/reserve-static-internal-ip-address).<br>The IP range must be large enough to accommodate multiple Filestore IP Ranges of /29 each, /26 if enterprise tier is used. |
@@ -134,8 +89,8 @@ Note that non-default networks require extra [firewall setup](https://cloud.goog
 * Clone the repository in cloudshell using following commands
 
 ```
-mkdir -p $GOPATH/src/sigs.k8s.io
-cd $GOPATH/src/sigs.k8s.io
+mkdir -p $GOPATH/src/github.com/kubernetes-sigs
+cd $GOPATH/src/github.com/kubernetes-sigs
 git clone https://github.com/kubernetes-sigs/gcp-filestore-csi-driver.git
 ```
 
@@ -151,9 +106,26 @@ $ PROJECT=<your-gcp-project> GCFS_SA_DIR=<your-directory-to-store-credentials-by
 
 * Choose a stable overlay that matches your cluster version, eg `stable-1-19`. If you are running a
   more recent cluster version than given here, use `stable-master`. The `prow-*` overlays are for
-  testing, and the `dev` overlay is for driver development. `./deploy/kubernetes/cluster-setup.sh`
+  testing, and the `dev` overlay is for driver development. `./deploy/kubernetes/cluster_setup.sh`
   will install the driver pods, as well as necessary RBAC and resources.
 
+* If deploying new changes in the master branch update the overlay file with a new custom tag to identify this image.
+```
+apiVersion: builtin
+kind: ImageTagTransformer
+metadata:
+  name: imagetag-gce-fs-driver
+imageTag:
+  name: k8s.gcr.io/cloud-provider-gcp/gcp-filestore-csi-driver
+  newName: gcr.io/<your-project>/gcp-filestore-csi-driver # Add newName
+  newTag: "<your-custom-tag>" # Change to your custom tag
+```
+Make and build the image if deploying new master branch.
+
+```
+GCP_FS_CSI_STAGING_VERSION=<your-custom-tag> GCP_FS_CSI_STAGING_IMAGE=gcr.io/<your-project>/gcp-filestore-csi-driver make build-image-and-push
+```
+Once the image is pushed it can be verified by visiting `https://pantheon.corp.google.com/gcr/images/<your-project>/global/gcp-filestore-csi-driver`
 ```
 $ PROJECT=<your-gcp-project> DEPLOY_VERSION=<your-overlay-choice> GCFS_SA_DIR=<your-directory-to-store-credentials-by-default-home-dir> ./deploy/kubernetes/cluster_setup.sh
 ```
