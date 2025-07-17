@@ -42,9 +42,11 @@ github.com/go-openapi/swag
 ## explicit; go 1.15
 github.com/gogo/protobuf/proto
 github.com/gogo/protobuf/sortkeys
-# github.com/golang/glog v1.0.0
-## explicit; go 1.11
+# github.com/golang/glog v1.0.0 => github.com/golang/glog v1.2.4
+## explicit; go 1.19
 github.com/golang/glog
+github.com/golang/glog/internal/logsink
+github.com/golang/glog/internal/stackdump
 # github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da
 ## explicit
 github.com/golang/groupcache/lru
@@ -66,7 +68,7 @@ github.com/google/gnostic/extensions
 github.com/google/gnostic/jsonschema
 github.com/google/gnostic/openapiv2
 github.com/google/gnostic/openapiv3
-# github.com/google/go-cmp v0.5.8
+# github.com/google/go-cmp v0.6.0
 ## explicit; go 1.13
 github.com/google/go-cmp/cmp
 github.com/google/go-cmp/cmp/internal/diff
@@ -733,3 +735,4 @@ sigs.k8s.io/yaml
 # k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.24.1
 # k8s.io/sample-cli-plugin => k8s.io/sample-cli-plugin v0.24.1
 # k8s.io/sample-controller => k8s.io/sample-controller v0.24.1
+# github.com/golang/glog => github.com/golang/glog v1.2.4
