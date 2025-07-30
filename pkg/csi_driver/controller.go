@@ -49,7 +49,7 @@ const (
 	v3FileProtocol   = "NFS_V3"
 	v4_1FileProtocol = "NFS_V4_1"
 
-	defaultTierMinSize    = 1 * util.Tb
+	defaultTierMinSize    = 100 * util.Gb
 	defaultTierMaxSize    = 639 * util.Tb / 10
 	enterpriseTierMinSize = 1 * util.Tb
 	enterpriseTierMaxSize = 10 * util.Tb
@@ -75,6 +75,7 @@ const (
 	attrVolume             = "volume"
 	attrSupportLockRelease = "supportLockRelease"
 	attrFileProtocol       = "fileProtocol"
+	attrMountOptions       = "mountOptions"
 )
 
 // CreateVolume parameters
@@ -91,6 +92,7 @@ const (
 	ParamNfsExportOptions          = "nfs-export-options-on-create"
 	paramMaxVolumeSize             = "max-volume-size"
 	paramFileProtocol              = "protocol"
+	paramMountOptions              = "mount-options"
 
 	// Keys for PV and PVC parameters as reported by external-provisioner
 	ParameterKeyPVCName      = "csi.storage.k8s.io/pvc/name"
@@ -139,6 +141,7 @@ type capacityRangeForTier struct {
 
 // controllerServer handles volume provisioning
 type controllerServer struct {
+	csi.UnimplementedControllerServer
 	config *controllerServerConfig
 }
 
@@ -337,6 +340,12 @@ func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
 	resp := &csi.CreateVolumeResponse{Volume: s.fileInstanceToCSIVolume(filer, modeInstance)}
+	if mountOptions, ok := req.GetParameters()[paramMountOptions]; ok && mountOptions != "" {
+		if resp.Volume.VolumeContext == nil {
+			resp.Volume.VolumeContext = make(map[string]string)
+		}
+		resp.Volume.VolumeContext[attrMountOptions] = mountOptions
+	}
 
 	klog.Infof("CreateVolume succeeded: %+v", resp)
 	return resp, nil
@@ -507,6 +516,10 @@ func (s *controllerServer) ControllerGetCapabilities(ctx context.Context, req *c
 	}, nil
 }
 
+func (d *controllerServer) ControllerModifyVolume(ctx context.Context, req *csi.ControllerModifyVolumeRequest) (*csi.ControllerModifyVolumeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "ControllerModifyVolume is not implemented")
+}
+
 // getTierFromParams returns the provided tier or default
 func getTierFromParams(params map[string]string) string {
 	if val, ok := params[paramTier]; ok {
@@ -529,13 +542,15 @@ func invalidCapacityRange(requestedCapRange *csi.CapacityRange, tier string, val
 	}
 
 	if requireSet {
-		if requiredCap > validRange.max {
-			return fmt.Errorf("request bytes %vTiB is more than maximum instance size bytes %vTiB for tier %s", float64(requiredCap)/util.Tb, float64(validRange.max)/util.Tb, tier)
+		if !limitSet && requiredCap > validRange.max {
+			klog.Warningf("Request bytes %vTiB is more than maximum instance size bytes %vTiB for tier %s, but no upper bound was specified. Rounding off capacity request to %vTiB for tier %s", float64(requiredCap)/util.Tb, float64(validRange.max)/util.Tb, tier, float64(validRange.max)/util.Tb, tier)
+		} else if requiredCap > validRange.max {
+			return fmt.Errorf("Request bytes %vTiB is more than maximum instance size bytes %vTiB for tier %s", float64(requiredCap)/util.Tb, float64(validRange.max)/util.Tb, tier)
 		}
 
 		if !limitSet && requiredCap < validRange.min {
 			// Avoid surprising users by provisioning more than Requested
-			klog.Warningf("required bytes %vTiB is less than minimum instance size capacity %vTiB for tier %s, but no upper bound was specified. Rounding up capacity request to %vTiB for tier %s.", float64(requiredCap)/util.Tb, float64(validRange.min)/util.Tb, tier, float64(validRange.min)/util.Tb, tier)
+			klog.Warningf("Required bytes %vTiB is less than minimum instance size capacity %vTiB for tier %s, but no upper bound was specified. Rounding up capacity request to %vTiB for tier %s.", float64(requiredCap)/util.Tb, float64(validRange.min)/util.Tb, tier, float64(validRange.min)/util.Tb, tier)
 		}
 	}
 	if limitSet {
@@ -669,8 +684,10 @@ func (s *controllerServer) generateNewFileInstance(name string, capBytes int64, 
 		case cloud.ParameterKeyResourceTags:
 			continue
 		case paramFileProtocol:
-			fileProtocol = v
-		case ParameterKeyLabels, ParameterKeyPVCName, ParameterKeyPVCNamespace, ParameterKeyPVName:
+			if s.config.features.FeatureNFSv4Support.Enabled {
+				fileProtocol = v
+			}
+		case ParameterKeyLabels, ParameterKeyPVCName, ParameterKeyPVCNamespace, ParameterKeyPVName, paramMountOptions:
 		case "csiprovisionersecretname", "csiprovisionersecretnamespace":
 		default:
 			return nil, fmt.Errorf("invalid parameter %q", k)

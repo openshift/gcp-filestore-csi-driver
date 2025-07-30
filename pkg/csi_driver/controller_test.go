@@ -22,9 +22,11 @@ import (
 	"testing"
 
 	csi "github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/google/go-cmp/cmp"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/testing/protocmp"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	cloud "sigs.k8s.io/gcp-filestore-csi-driver/pkg/cloud_provider"
@@ -111,6 +113,9 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 			Enabled: true,
 		},
 		FeatureLockRelease: &FeatureLockRelease{},
+		FeatureNFSv4Support: &FeatureNFSv4Support{
+			Enabled: true,
+		},
 	}
 
 	cases := []struct {
@@ -235,6 +240,7 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 				Parameters:         map[string]string{"tier": enterpriseTier, paramFileProtocol: v4_1FileProtocol},
 				VolumeCapabilities: volumeCapabilities,
 			},
+			features: features,
 			resp: &csi.CreateVolumeResponse{
 				Volume: &csi.Volume{
 					CapacityBytes: testBytes,
@@ -428,8 +434,8 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 				}
 			}
 		}
-		if !reflect.DeepEqual(resp, test.resp) {
-			t.Errorf("test %q failed: got resp %+v, expected %+v", test.name, resp, test.resp)
+		if !cmp.Equal(resp, test.resp, protocmp.Transform()) {
+			t.Errorf("test %q failed: got resp %+v, expected %+v, diff: %s", test.name, resp, test.resp, cmp.Diff(resp, test.resp, protocmp.Transform()))
 		}
 	}
 }
@@ -440,6 +446,9 @@ func TestCreateVolume(t *testing.T) {
 			Enabled: true,
 		},
 		FeatureLockRelease: &FeatureLockRelease{},
+		FeatureNFSv4Support: &FeatureNFSv4Support{
+			Enabled: true,
+		},
 	}
 	cases := []struct {
 		name            string
@@ -501,7 +510,7 @@ func TestCreateVolume(t *testing.T) {
 			},
 			resp: &csi.CreateVolumeResponse{
 				Volume: &csi.Volume{
-					CapacityBytes: 1 * util.Tb,
+					CapacityBytes: 100 * util.Gb,
 					VolumeId:      testVolumeID,
 					VolumeContext: map[string]string{
 						attrIP:           testIP,
@@ -692,7 +701,7 @@ func TestCreateVolume(t *testing.T) {
 			},
 			resp: &csi.CreateVolumeResponse{
 				Volume: &csi.Volume{
-					CapacityBytes: 1 * util.Tb,
+					CapacityBytes: 100 * util.Gb,
 					VolumeId:      testVolumeID,
 					VolumeContext: map[string]string{
 						attrIP:           testIP,
@@ -701,6 +710,40 @@ func TestCreateVolume(t *testing.T) {
 					},
 				},
 			},
+		},
+		{
+			name: "create volume with mount options",
+			req: &csi.CreateVolumeRequest{
+				Name: testCSIVolume,
+				VolumeCapabilities: []*csi.VolumeCapability{
+					{
+						AccessType: &csi.VolumeCapability_Mount{
+							Mount: &csi.VolumeCapability_MountVolume{},
+						},
+						AccessMode: &csi.VolumeCapability_AccessMode{
+							Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+						},
+					},
+				},
+				Parameters: map[string]string{
+					"tier":          zonalTier,
+					"protocol":      v4_1FileProtocol,
+					"mount-options": "noatime,nodiratime",
+				},
+			},
+			resp: &csi.CreateVolumeResponse{
+				Volume: &csi.Volume{
+					CapacityBytes: 1 * util.Tb,
+					VolumeId:      testVolumeID,
+					VolumeContext: map[string]string{
+						attrIP:           testIP,
+						attrVolume:       newInstanceVolume,
+						attrFileProtocol: v4_1FileProtocol,
+						attrMountOptions: "noatime,nodiratime",
+					},
+				},
+			},
+			features: features,
 		},
 	}
 
@@ -722,8 +765,8 @@ func TestCreateVolume(t *testing.T) {
 		if test.expectErr && err == nil {
 			t.Errorf("test %q failed; got success", test.name)
 		}
-		if !reflect.DeepEqual(resp, test.resp) {
-			t.Errorf("test %q failed: got resp %+v, expected %+v", test.name, resp, test.resp)
+		if !cmp.Equal(resp, test.resp, protocmp.Transform()) {
+			t.Errorf("test %q failed: got resp %+v, expected %+v, diff: %s", test.name, resp, test.resp, cmp.Diff(resp, test.resp, protocmp.Transform()))
 		}
 
 		if !test.expectErr && test.req.Parameters[ParamNfsExportOptions] != "" {
@@ -791,6 +834,30 @@ func TestControllerGetCapabilities(t *testing.T) {
 func TestControllerExpandVolume(t *testing.T) {
 }
 
+func TestControllerModifyVolume_Unimplemented(t *testing.T) {
+	ctrl := &controllerServer{}
+
+	req := &csi.ControllerModifyVolumeRequest{}
+	resp, err := ctrl.ControllerModifyVolume(context.Background(), req)
+
+	if resp != nil {
+		t.Errorf("expected nil response, got: %v", resp)
+	}
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got: %v", err)
+	}
+	if st.Code() != codes.Unimplemented {
+		t.Errorf("expected Unimplemented code, got: %v", st.Code())
+	}
+	if st.Message() != "ControllerModifyVolume is not implemented" {
+		t.Errorf("unexpected error message: %v", st.Message())
+	}
+}
+
 func TestGetRequestCapacity(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -801,25 +868,33 @@ func TestGetRequestCapacity(t *testing.T) {
 	}{
 		{
 			name:  "default",
-			bytes: 1 * util.Tb,
+			bytes: 100 * util.Gb,
 			tier:  defaultTier,
-		},
-		{
-			name: "required below min, limit not provided",
-			capRange: &csi.CapacityRange{
-				RequiredBytes: 100 * util.Gb,
-			},
-			tier:          defaultTier,
-			bytes:         1 * util.Tb,
-			errorExpected: false,
 		},
 		{
 			name: "required equals min",
 			capRange: &csi.CapacityRange{
-				RequiredBytes: 1 * util.Tb,
+				RequiredBytes: 100 * util.Gb,
 			},
-			tier:  defaultTier,
-			bytes: 1 * util.Tb,
+			tier:          defaultTier,
+			bytes:         100 * util.Gb,
+			errorExpected: false,
+		},
+		{
+			name: "required above small zonal",
+			capRange: &csi.CapacityRange{
+				RequiredBytes: 11 * util.Tb,
+			},
+			tier:  zonalTier,
+			bytes: 11 * util.Tb,
+		},
+		{
+			name: "required in between small and large zonal",
+			capRange: &csi.CapacityRange{
+				RequiredBytes: 9990 * util.Gb,
+			},
+			tier:  zonalTier,
+			bytes: 10 * util.Tb,
 		},
 		{
 			name: "required above min",
@@ -832,10 +907,10 @@ func TestGetRequestCapacity(t *testing.T) {
 		{
 			name: "limit equals min",
 			capRange: &csi.CapacityRange{
-				LimitBytes: 1 * util.Tb,
+				LimitBytes: 100 * util.Gb,
 			},
 			tier:  defaultTier,
-			bytes: 1 * util.Tb,
+			bytes: 100 * util.Gb,
 		},
 		{
 			name: "limit above min",
@@ -848,17 +923,17 @@ func TestGetRequestCapacity(t *testing.T) {
 		{
 			name: "required below min, limit above min",
 			capRange: &csi.CapacityRange{
-				RequiredBytes: 100 * util.Gb,
+				RequiredBytes: 80 * util.Gb,
 				LimitBytes:    2 * util.Tb,
 			},
 			tier:  defaultTier,
-			bytes: 1 * util.Tb,
+			bytes: 100 * util.Gb,
 		},
 		{
 			name: "required below min, limit below min",
 			capRange: &csi.CapacityRange{
-				RequiredBytes: 100 * util.Gb,
-				LimitBytes:    500 * util.Gb,
+				RequiredBytes: 50 * util.Gb,
+				LimitBytes:    90 * util.Gb,
 			},
 			tier:          defaultTier,
 			errorExpected: true,
@@ -875,14 +950,15 @@ func TestGetRequestCapacity(t *testing.T) {
 		{
 			name: "limit below min default",
 			capRange: &csi.CapacityRange{
-				LimitBytes: 100 * util.Gb,
+				LimitBytes: 10 * util.Gb,
 			},
 			tier:          defaultTier,
 			errorExpected: true,
 		},
 		{
-			name: "required above max default",
+			name: "required above max default with limit set",
 			capRange: &csi.CapacityRange{
+				LimitBytes:    50 * util.Tb,
 				RequiredBytes: 100 * util.Tb,
 			},
 			tier:          defaultTier,
@@ -915,12 +991,21 @@ func TestGetRequestCapacity(t *testing.T) {
 			errorExpected: true,
 		},
 		{
-			name: "required above max enterprise",
+			name: "required above max enterprise with limit set",
 			capRange: &csi.CapacityRange{
+				LimitBytes:    50 * util.Tb,
 				RequiredBytes: 100 * util.Tb,
 			},
 			tier:          enterpriseTier,
 			errorExpected: true,
+		},
+		{
+			name: "required above max enterprise without limit",
+			capRange: &csi.CapacityRange{
+				RequiredBytes: 100 * util.Tb,
+			},
+			tier:  enterpriseTier,
+			bytes: 100 * util.Tb,
 		},
 		{
 			name: "required and limit both in range enterprise",
@@ -940,8 +1025,9 @@ func TestGetRequestCapacity(t *testing.T) {
 			errorExpected: true,
 		},
 		{
-			name: "required above max highScale",
+			name: "required above max highScale with limit set",
 			capRange: &csi.CapacityRange{
+				LimitBytes:    100 * util.Tb,
 				RequiredBytes: 200 * util.Tb,
 			},
 			tier:          highScaleTier,
@@ -965,8 +1051,9 @@ func TestGetRequestCapacity(t *testing.T) {
 			errorExpected: true,
 		},
 		{
-			name: "required above max premium",
+			name: "required above max premium with limit set",
 			capRange: &csi.CapacityRange{
+				LimitBytes:    60 * util.Tb,
 				RequiredBytes: 70 * util.Tb,
 			},
 			tier:          premiumTier,
@@ -990,8 +1077,9 @@ func TestGetRequestCapacity(t *testing.T) {
 			errorExpected: true,
 		},
 		{
-			name: "required above max basicSSD",
+			name: "required above max basicSSD with limit set",
 			capRange: &csi.CapacityRange{
+				LimitBytes:    639 * util.Tb / 10,
 				RequiredBytes: 70 * util.Tb,
 			},
 			tier:          basicSSDTier,
@@ -1009,14 +1097,15 @@ func TestGetRequestCapacity(t *testing.T) {
 		{
 			name: "limit below min basicHDD",
 			capRange: &csi.CapacityRange{
-				LimitBytes: 100 * util.Gb,
+				LimitBytes: 10 * util.Gb,
 			},
 			tier:          basicHDDTier,
 			errorExpected: true,
 		},
 		{
-			name: "required above max basicHDD",
+			name: "required above max basicHDD with limit set",
 			capRange: &csi.CapacityRange{
+				LimitBytes:    639 * util.Tb / 10,
 				RequiredBytes: 70 * util.Tb,
 			},
 			tier:          basicHDDTier,
@@ -1040,8 +1129,9 @@ func TestGetRequestCapacity(t *testing.T) {
 			bytes: 100 * util.Tb,
 		},
 		{
-			name: "required above max BASIC_SSD all cap",
+			name: "required above max BASIC_SSD all cap with limit set",
 			capRange: &csi.CapacityRange{
+				LimitBytes:    639 * util.Tb / 10,
 				RequiredBytes: 70 * util.Tb,
 			},
 			tier:          "BASIC_SSD",
@@ -1097,8 +1187,9 @@ func TestGetRequestCapacity(t *testing.T) {
 			bytes: 10 * util.Tb,
 		},
 		{
-			name: "required above large ZONAL range",
+			name: "required above large ZONAL range with limit set",
 			capRange: &csi.CapacityRange{
+				LimitBytes:    100 * util.Tb,
 				RequiredBytes: 110 * util.Tb,
 			},
 			tier:          "ZONAL",

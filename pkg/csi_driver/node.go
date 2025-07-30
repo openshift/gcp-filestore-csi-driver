@@ -29,6 +29,7 @@ import (
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	kuberuntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
@@ -58,6 +59,7 @@ type nodeServer struct {
 	volumeLocks           *util.VolumeLocks
 	lockReleaseController *lockrelease.LockReleaseController
 	features              *GCFSDriverFeatureOptions
+	csi.UnimplementedNodeServer
 }
 
 func newNodeServer(driver *GCFSDriver, mounter mount.Interface, metaService metadata.Service, featureOptions *GCFSDriverFeatureOptions) (csi.NodeServer, error) {
@@ -73,6 +75,7 @@ func newNodeServer(driver *GCFSDriver, mounter mount.Interface, metaService meta
 		if err != nil {
 			return nil, err
 		}
+		config.ContentType = kuberuntime.ContentTypeProtobuf
 		client, err := kubernetes.NewForConfig(config)
 		if err != nil {
 			return nil, err
@@ -92,6 +95,7 @@ func (s *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublish
 	readOnly := req.GetReadonly()
 	targetPath := req.GetTargetPath()
 	stagingTargetPath := req.GetStagingTargetPath()
+	volumeContext := req.GetVolumeContext()
 	if len(targetPath) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "NodePublishVolume target path must be provided")
 	}
@@ -154,6 +158,10 @@ func (s *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublish
 	}
 	if capMount := req.GetVolumeCapability().GetMount(); capMount != nil {
 		options = append(options, capMount.GetMountFlags()...)
+	}
+
+	if mountOptions := volumeContext[attrMountOptions]; mountOptions != "" {
+		options = append(options, mountOptions)
 	}
 
 	err = s.mounter.Mount(stagingTargetPath, targetPath, fstype, options)
@@ -301,7 +309,7 @@ func (s *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 	}
 
 	fileProtocol, ok := attr[attrFileProtocol]
-	if !ok {
+	if (s.features.FeatureNFSv4Support != nil && !s.features.FeatureNFSv4Support.Enabled) || !ok {
 		fileProtocol = v3FileProtocol
 	}
 
@@ -329,6 +337,10 @@ func (s *nodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolu
 		for _, flag := range mnt.MountFlags {
 			options = append(options, flag)
 		}
+	}
+
+	if mountOptions := attr[attrMountOptions]; mountOptions != "" {
+		options = append(options, mountOptions)
 	}
 
 	err = s.mounter.Mount(source, stagingTargetPath, fstype, options)
