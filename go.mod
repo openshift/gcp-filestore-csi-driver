@@ -2,7 +2,7 @@ module sigs.k8s.io/gcp-filestore-csi-driver
 
 go 1.24.0
 
-toolchain go1.24.2
+toolchain go1.24.13
 
 require (
 	cloud.google.com/go/compute/metadata v0.9.0
