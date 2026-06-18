@@ -1,24 +1,3 @@
 approvers:
-  - mattcary
-  - msau42
-  - saikat-royc
-  - leiyiz
-  - tyuchn
-  - songjiaxun
-  - dannawang0221
-  - riteshghorse
-  - savirg
-reviewers:
-  - mattcary
-  - msau42
-  - saikat-royc
-  - leiyiz
-  - pwschuurman
-  - judemars
-  - sunnylovestiramisu
-  - amacaskill
-  - tyuchn
-  - songjiaxun
-  - dannawang0221
-  - riteshghorse
-  - savirg
+- openshift-storage-maintainers
+component: "Storage / Kubernetes External Components"
