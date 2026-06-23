@@ -1,4 +1,4 @@
-// Copyright 2022 Google LLC.
+// Copyright 2024 Google LLC.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -8,33 +8,46 @@
 //
 // For product documentation, see: https://cloud.google.com/filestore/
 //
-// Creating a client
+// # Library status
+//
+// These client libraries are officially supported by Google. However, this
+// library is considered complete and is in maintenance mode. This means
+// that we will address critical bugs and security issues but will not add
+// any new features.
+//
+// When possible, we recommend using our newer
+// [Cloud Client Libraries for Go](https://pkg.go.dev/cloud.google.com/go)
+// that are still actively being worked and iterated on.
+//
+// # Creating a client
 //
 // Usage example:
 //
-//   import "google.golang.org/api/file/v1beta1"
-//   ...
-//   ctx := context.Background()
-//   fileService, err := file.NewService(ctx)
+//	import "google.golang.org/api/file/v1beta1"
+//	...
+//	ctx := context.Background()
+//	fileService, err := file.NewService(ctx)
 //
-// In this example, Google Application Default Credentials are used for authentication.
+// In this example, Google Application Default Credentials are used for
+// authentication. For information on how to create and obtain Application
+// Default Credentials, see https://developers.google.com/identity/protocols/application-default-credentials.
 //
-// For information on how to create and obtain Application Default Credentials, see https://developers.google.com/identity/protocols/application-default-credentials.
+// # Other authentication options
 //
-// Other authentication options
+// To use an API key for authentication (note: some APIs do not support API
+// keys), use [google.golang.org/api/option.WithAPIKey]:
 //
-// To use an API key for authentication (note: some APIs do not support API keys), use option.WithAPIKey:
+//	fileService, err := file.NewService(ctx, option.WithAPIKey("AIza..."))
 //
-//   fileService, err := file.NewService(ctx, option.WithAPIKey("AIza..."))
+// To use an OAuth token (e.g., a user token obtained via a three-legged OAuth
+// flow, use [google.golang.org/api/option.WithTokenSource]:
 //
-// To use an OAuth token (e.g., a user token obtained via a three-legged OAuth flow), use option.WithTokenSource:
+//	config := &oauth2.Config{...}
+//	// ...
+//	token, err := config.Exchange(ctx, ...)
+//	fileService, err := file.NewService(ctx, option.WithTokenSource(config.TokenSource(ctx, token)))
 //
-//   config := &oauth2.Config{...}
-//   // ...
-//   token, err := config.Exchange(ctx, ...)
-//   fileService, err := file.NewService(ctx, option.WithTokenSource(config.TokenSource(ctx, token)))
-//
-// See https://godoc.org/google.golang.org/api/option/ for details on options.
+// See [google.golang.org/api/option.ClientOption] for details on options.
 package file // import "google.golang.org/api/file/v1beta1"
 
 import (
@@ -71,12 +84,15 @@ var _ = errors.New
 var _ = strings.Replace
 var _ = context.Canceled
 var _ = internaloption.WithDefaultEndpoint
+var _ = internal.Version
 
 const apiId = "file:v1beta1"
 const apiName = "file"
 const apiVersion = "v1beta1"
 const basePath = "https://file.googleapis.com/"
+const basePathTemplate = "https://file.UNIVERSE_DOMAIN/"
 const mtlsBasePath = "https://file.mtls.googleapis.com/"
+const defaultUniverseDomain = "googleapis.com"
 
 // OAuth2 scopes used by this API.
 const (
@@ -93,7 +109,9 @@ func NewService(ctx context.Context, opts ...option.ClientOption) (*Service, err
 	// NOTE: prepend, so we don't override user-specified scopes.
 	opts = append([]option.ClientOption{scopesOption}, opts...)
 	opts = append(opts, internaloption.WithDefaultEndpoint(basePath))
+	opts = append(opts, internaloption.WithDefaultEndpointTemplate(basePathTemplate))
 	opts = append(opts, internaloption.WithDefaultMTLSEndpoint(mtlsBasePath))
+	opts = append(opts, internaloption.WithDefaultUniverseDomain(defaultUniverseDomain))
 	client, endpoint, err := htransport.NewClient(ctx, opts...)
 	if err != nil {
 		return nil, err
@@ -218,7 +236,7 @@ type ProjectsLocationsOperationsService struct {
 	s *Service
 }
 
-// Backup: A Cloud Filestore backup.
+// Backup: A Filestore backup.
 type Backup struct {
 	// CapacityGb: Output only. Capacity of the source file share when the
 	// backup was created.
@@ -245,20 +263,23 @@ type Backup struct {
 	// `projects/{project_id}/locations/{location_id}/backups/{backup_id}`.
 	Name string `json:"name,omitempty"`
 
+	// SatisfiesPzi: Output only. Reserved for future use.
+	SatisfiesPzi bool `json:"satisfiesPzi,omitempty"`
+
 	// SatisfiesPzs: Output only. Reserved for future use.
 	SatisfiesPzs bool `json:"satisfiesPzs,omitempty"`
 
-	// SourceFileShare: Name of the file share in the source Cloud Filestore
+	// SourceFileShare: Name of the file share in the source Filestore
 	// instance that the backup is created from.
 	SourceFileShare string `json:"sourceFileShare,omitempty"`
 
-	// SourceInstance: The resource name of the source Cloud Filestore
-	// instance, in the format
+	// SourceInstance: The resource name of the source Filestore instance,
+	// in the format
 	// `projects/{project_id}/locations/{location_id}/instances/{instance_id}
 	// `, used to create this backup.
 	SourceInstance string `json:"sourceInstance,omitempty"`
 
-	// SourceInstanceTier: Output only. The service tier of the source Cloud
+	// SourceInstanceTier: Output only. The service tier of the source
 	// Filestore instance that this backup is created from.
 	//
 	// Possible values:
@@ -277,6 +298,10 @@ type Backup struct {
 	// performance scaling capabilities.
 	//   "ENTERPRISE" - ENTERPRISE instances offer the features and
 	// availability needed for mission-critical workloads.
+	//   "ZONAL" - ZONAL instances offer expanded capacity and performance
+	// scaling capabilities.
+	//   "REGIONAL" - REGIONAL instances offer the features and availability
+	// needed for mission-critical workloads.
 	SourceInstanceTier string `json:"sourceInstanceTier,omitempty"`
 
 	// State: Output only. The backup state.
@@ -289,6 +314,8 @@ type Backup struct {
 	// reflected in the backup.
 	//   "READY" - Backup is available for use.
 	//   "DELETING" - Backup is being deleted.
+	//   "INVALID" - Backup is not valid and cannot be used for creating new
+	// instances or restoring existing instances.
 	State string `json:"state,omitempty"`
 
 	// StorageBytes: Output only. The size of the storage used by the
@@ -451,6 +478,38 @@ func (s *DenyMaintenancePeriod) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
+// DirectoryServicesConfig: Directory Services configuration for
+// Kerberos-based authentication.
+type DirectoryServicesConfig struct {
+	// ManagedActiveDirectory: Configuration for Managed Service for
+	// Microsoft Active Directory.
+	ManagedActiveDirectory *ManagedActiveDirectoryConfig `json:"managedActiveDirectory,omitempty"`
+
+	// ForceSendFields is a list of field names (e.g.
+	// "ManagedActiveDirectory") to unconditionally include in API requests.
+	// By default, fields with empty or default values are omitted from API
+	// requests. However, any non-pointer, non-interface field appearing in
+	// ForceSendFields will be sent to the server regardless of whether the
+	// field is empty or not. This may be used to include empty fields in
+	// Patch requests.
+	ForceSendFields []string `json:"-"`
+
+	// NullFields is a list of field names (e.g. "ManagedActiveDirectory")
+	// to include in API requests with the JSON null value. By default,
+	// fields with empty values are omitted from API requests. However, any
+	// field with an empty value appearing in NullFields will be sent to the
+	// server as null. It is an error if a field in this list has a
+	// non-empty value. This may be used to include null fields in Patch
+	// requests.
+	NullFields []string `json:"-"`
+}
+
+func (s *DirectoryServicesConfig) MarshalJSON() ([]byte, error) {
+	type NoMethod DirectoryServicesConfig
+	raw := NoMethod(*s)
+	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
+}
+
 // Empty: A generic empty message that you can re-use to avoid defining
 // duplicated empty messages in your APIs. A typical example is to use
 // it as the request or the response type of an API method. For
@@ -464,13 +523,14 @@ type Empty struct {
 
 // FileShareConfig: File share configuration for the instance.
 type FileShareConfig struct {
-	// CapacityGb: File share capacity in gigabytes (GB). Cloud Filestore
-	// defines 1 GB as 1024^3 bytes.
+	// CapacityGb: File share capacity in gigabytes (GB). Filestore defines
+	// 1 GB as 1024^3 bytes.
 	CapacityGb int64 `json:"capacityGb,omitempty,string"`
 
-	// Name: The name of the file share (must be 32 characters or less for
-	// Enterprise and High Scale SSD tiers and 16 characters or less for all
-	// other tiers).
+	// Name: Required. The name of the file share. Must use 1-16 characters
+	// for the basic service tier and 1-63 characters for all other service
+	// tiers. Must use lowercase letters, numbers, or underscores
+	// `[a-z0-9_]`. Must start with a letter. Immutable.
 	Name string `json:"name,omitempty"`
 
 	// NfsExportOptions: Nfs Export Options. There is a limit of 10 export
@@ -505,12 +565,34 @@ func (s *FileShareConfig) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
+// GoogleCloudSaasacceleratorManagementProvidersV1Instance: Instance
+// represents the interface for SLM services to actuate the state of
+// control plane resources. Example Instance in JSON, where
+// consumer-project-number=123456, producer-project-id=cloud-sql:
+// ```json Instance: { "name":
+// "projects/123456/locations/us-east1/instances/prod-instance",
+// "create_time": { "seconds": 1526406431, }, "labels": { "env": "prod",
+// "foo": "bar" }, "state": READY, "software_versions": {
+// "software_update": "cloud-sql-09-28-2018", },
+// "maintenance_policy_names": { "UpdatePolicy":
+// "projects/123456/locations/us-east1/maintenancePolicies/prod-update-po
+// licy", } "tenant_project_id": "cloud-sql-test-tenant",
+// "producer_metadata": { "cloud-sql-tier": "basic",
+// "cloud-sql-instance-size": "1G", }, "provisioned_resources": [ {
+// "resource-type": "compute-instance", "resource-url":
+// "https://www.googleapis.com/compute/v1/projects/cloud-sql/zones/us-eas
+// t1-b/instances/vm-1", } ], "maintenance_schedules": { "csa_rollout":
+// { "start_time": { "seconds": 1526406431, }, "end_time": { "seconds":
+// 1535406431, }, }, "ncsa_rollout": { "start_time": { "seconds":
+// 1526406431, }, "end_time": { "seconds": 1535406431, }, } },
+// "consumer_defined_name": "my-sql-instance1", } ``` LINT.IfChange
 type GoogleCloudSaasacceleratorManagementProvidersV1Instance struct {
-	// ConsumerDefinedName: consumer_defined_name is the name that is set by
-	// the consumer. On the other hand Name field represents system-assigned
-	// id of an instance so consumers are not necessarily aware of it.
-	// consumer_defined_name is used for notification/UI purposes for
-	// consumer to recognize their instances.
+	// ConsumerDefinedName: consumer_defined_name is the name of the
+	// instance set by the service consumers. Generally this is different
+	// from the `name` field which reperesents the system-assigned id of the
+	// instance which the service consumers do not recognize. This is a
+	// required field for tenants onboarding to Maintenance Window
+	// notifications (go/slm-rollout-maintenance-policies#prerequisites).
 	ConsumerDefinedName string `json:"consumerDefinedName,omitempty"`
 
 	// CreateTime: Output only. Timestamp when the resource was created.
@@ -530,11 +612,12 @@ type GoogleCloudSaasacceleratorManagementProvidersV1Instance struct {
 	// value are arbitrary strings provided by the user.
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// MaintenancePolicyNames: Optional. Deprecated. The MaintenancePolicies
-	// that have been attached to the instance. The key must be of the type
-	// name of the oneof policy name defined in MaintenancePolicy, and the
-	// referenced policy must define the same policy type. For complete
-	// details of MaintenancePolicy, please refer to go/cloud-saas-mw-ug.
+	// MaintenancePolicyNames: Optional. The MaintenancePolicies that have
+	// been attached to the instance. The key must be of the type name of
+	// the oneof policy name defined in MaintenancePolicy, and the
+	// referenced policy must define the same policy type. For details,
+	// please refer to go/mr-user-guide. Should not be set if
+	// maintenance_settings.maintenance_policies is set.
 	MaintenancePolicyNames map[string]string `json:"maintenancePolicyNames,omitempty"`
 
 	// MaintenanceSchedules: The MaintenanceSchedule contains the scheduling
@@ -701,9 +784,10 @@ type GoogleCloudSaasacceleratorManagementProvidersV1MaintenanceSettings struct {
 	// MaintenancePolicies: Optional. The MaintenancePolicies that have been
 	// attached to the instance. The key must be of the type name of the
 	// oneof policy name defined in MaintenancePolicy, and the embedded
-	// policy must define the same policy type. For complete details of
-	// MaintenancePolicy, please refer to go/cloud-saas-mw-ug. If only the
-	// name is needed, then only populate MaintenancePolicy.name.
+	// policy must define the same policy type. For details, please refer to
+	// go/mr-user-guide. Should not be set if maintenance_policy_names is
+	// set. If only the name is needed, then only populate
+	// MaintenancePolicy.name.
 	MaintenancePolicies map[string]MaintenancePolicy `json:"maintenancePolicies,omitempty"`
 
 	// ForceSendFields is a list of field names (e.g. "Exclude") to
@@ -960,7 +1044,7 @@ func (s *GoogleCloudSaasacceleratorManagementProvidersV1SloMetadata) MarshalJSON
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
-// Instance: A Cloud Filestore instance.
+// Instance: A Filestore instance.
 type Instance struct {
 	// CapacityGb: The storage capacity of the instance in gigabytes (GB =
 	// 1024^3 bytes). This capacity can be increased up to `max_capacity_gb`
@@ -977,6 +1061,11 @@ type Instance struct {
 	// Description: The description of the instance (2048 characters or
 	// less).
 	Description string `json:"description,omitempty"`
+
+	// DirectoryServices: Directory Services configuration for
+	// Kerberos-based authentication. Should only be set if protocol is
+	// "NFS_V4_1".
+	DirectoryServices *DirectoryServicesConfig `json:"directoryServices,omitempty"`
 
 	// Etag: Server-specified ETag for the instance resource to prevent
 	// simultaneous updates from overwriting each other.
@@ -995,7 +1084,7 @@ type Instance struct {
 	// MaxCapacityGb: Output only. The max capacity of the instance.
 	MaxCapacityGb int64 `json:"maxCapacityGb,omitempty,string"`
 
-	// MaxShareCount: Output only. The max number of shares allowed.
+	// MaxShareCount: The max number of shares allowed.
 	MaxShareCount int64 `json:"maxShareCount,omitempty,string"`
 
 	// MultiShareEnabled: Indicates whether this instance uses a multi-share
@@ -1012,6 +1101,21 @@ type Instance struct {
 	// Networks: VPC networks to which the instance is connected. For this
 	// version, only a single network is supported.
 	Networks []*NetworkConfig `json:"networks,omitempty"`
+
+	// Protocol: Immutable. The protocol indicates the access protocol for
+	// all shares in the instance. This field is immutable and it cannot be
+	// changed after the instance has been created. Default value: `NFS_V3`.
+	//
+	// Possible values:
+	//   "FILE_PROTOCOL_UNSPECIFIED" - FILE_PROTOCOL_UNSPECIFIED serves a
+	// "not set" default value when a FileProtocol is a separate field in a
+	// message.
+	//   "NFS_V3" - NFS 3.0.
+	//   "NFS_V4_1" - NFS 4.1.
+	Protocol string `json:"protocol,omitempty"`
+
+	// SatisfiesPzi: Output only. Reserved for future use.
+	SatisfiesPzi bool `json:"satisfiesPzi,omitempty"`
 
 	// SatisfiesPzs: Output only. Reserved for future use.
 	SatisfiesPzs bool `json:"satisfiesPzs,omitempty"`
@@ -1035,6 +1139,9 @@ type Instance struct {
 	// details from the `suspension_reasons` field of the `Instance`
 	// resource.
 	//   "REVERTING" - The instance is reverting to a snapshot.
+	//   "SUSPENDING" - The instance is in the process of becoming
+	// suspended.
+	//   "RESUMING" - The instance is in the process of becoming active.
 	State string `json:"state,omitempty"`
 
 	// StatusMessage: Output only. Additional information about the instance
@@ -1068,6 +1175,10 @@ type Instance struct {
 	// performance scaling capabilities.
 	//   "ENTERPRISE" - ENTERPRISE instances offer the features and
 	// availability needed for mission-critical workloads.
+	//   "ZONAL" - ZONAL instances offer expanded capacity and performance
+	// scaling capabilities.
+	//   "REGIONAL" - REGIONAL instances offer the features and availability
+	// needed for mission-critical workloads.
 	Tier string `json:"tier,omitempty"`
 
 	// ServerResponse contains the HTTP response code and headers from the
@@ -1339,7 +1450,7 @@ func (s *ListSnapshotsResponse) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
-// Location: A resource that represents Google Cloud Platform location.
+// Location: A resource that represents a Google Cloud location.
 type Location struct {
 	// DisplayName: The friendly name for this location, typically a nearby
 	// city name. For example, "Tokyo".
@@ -1389,7 +1500,8 @@ func (s *Location) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
-// MaintenancePolicy: Defines policies to service maintenance events.
+// MaintenancePolicy: LINT.IfChange Defines policies to service
+// maintenance events.
 type MaintenancePolicy struct {
 	// CreateTime: Output only. The time when the resource was created.
 	CreateTime string `json:"createTime,omitempty"`
@@ -1481,6 +1593,41 @@ func (s *MaintenanceWindow) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
+// ManagedActiveDirectoryConfig: ManagedActiveDirectoryConfig contains
+// all the parameters for connecting to Managed Active Directory.
+type ManagedActiveDirectoryConfig struct {
+	// Computer: The computer name is used as a prefix to the mount remote
+	// target. Example: if the computer_name is `my-computer`, the mount
+	// command will look like: `$mount -o vers=4,sec=krb5
+	// my-computer.filestore.:`.
+	Computer string `json:"computer,omitempty"`
+
+	// Domain: Fully qualified domain name.
+	Domain string `json:"domain,omitempty"`
+
+	// ForceSendFields is a list of field names (e.g. "Computer") to
+	// unconditionally include in API requests. By default, fields with
+	// empty or default values are omitted from API requests. However, any
+	// non-pointer, non-interface field appearing in ForceSendFields will be
+	// sent to the server regardless of whether the field is empty or not.
+	// This may be used to include empty fields in Patch requests.
+	ForceSendFields []string `json:"-"`
+
+	// NullFields is a list of field names (e.g. "Computer") to include in
+	// API requests with the JSON null value. By default, fields with empty
+	// values are omitted from API requests. However, any field with an
+	// empty value appearing in NullFields will be sent to the server as
+	// null. It is an error if a field in this list has a non-empty value.
+	// This may be used to include null fields in Patch requests.
+	NullFields []string `json:"-"`
+}
+
+func (s *ManagedActiveDirectoryConfig) MarshalJSON() ([]byte, error) {
+	type NoMethod ManagedActiveDirectoryConfig
+	raw := NoMethod(*s)
+	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
+}
+
 // NetworkConfig: Network configuration for the instance.
 type NetworkConfig struct {
 	// ConnectMode: The network connect mode of the Filestore instance. If
@@ -1529,8 +1676,8 @@ type NetworkConfig struct {
 	// that identifies the range of IP addresses reserved for this instance.
 	// For example, 10.0.0.0/29, 192.168.0.0/24, or 192.168.0.0/26,
 	// respectively. The range you specify can't overlap with either
-	// existing subnets or assigned IP address ranges for other Cloud
-	// Filestore instances in the selected VPC network.
+	// existing subnets or assigned IP address ranges for other Filestore
+	// instances in the selected VPC network.
 	ReservedIpRange string `json:"reservedIpRange,omitempty"`
 
 	// ForceSendFields is a list of field names (e.g. "ConnectMode") to
@@ -1589,6 +1736,21 @@ type NfsExportOptions struct {
 	// IP ranges/addresses for each FileShareConfig among all
 	// NfsExportOptions.
 	IpRanges []string `json:"ipRanges,omitempty"`
+
+	// SecurityFlavors: The security flavors allowed for mount operations.
+	// The default is AUTH_SYS.
+	//
+	// Possible values:
+	//   "SECURITY_FLAVOR_UNSPECIFIED" - SecurityFlavor not set.
+	//   "AUTH_SYS" - The user's UNIX user-id and group-ids are transferred
+	// "in the clear" (not encrypted) on the network, unauthenticated by the
+	// NFS server (default).
+	//   "KRB5" - End-user authentication through Kerberos V5.
+	//   "KRB5I" - krb5 plus integrity protection (data packets are tamper
+	// proof).
+	//   "KRB5P" - krb5i plus privacy protection (data packets are tamper
+	// proof and encrypted).
+	SecurityFlavors []string `json:"securityFlavors,omitempty"`
 
 	// SquashMode: Either NO_ROOT_SQUASH, for allowing root access on the
 	// exported directory, or ROOT_SQUASH, for not allowing root access. The
@@ -1650,8 +1812,8 @@ type Operation struct {
 	// `operations/{unique_id}`.
 	Name string `json:"name,omitempty"`
 
-	// Response: The normal response of the operation in case of success. If
-	// the original method returns no data on success, such as `Delete`, the
+	// Response: The normal, successful response of the operation. If the
+	// original method returns no data on success, such as `Delete`, the
 	// response is `google.protobuf.Empty`. If the original method is
 	// standard `Get`/`Create`/`Update`, the response should be the
 	// resource. For other methods, the response should have the type
@@ -1740,10 +1902,10 @@ func (s *OperationMetadata) MarshalJSON() ([]byte, error) {
 }
 
 // RestoreInstanceRequest: RestoreInstanceRequest restores an existing
-// instance's file share from a snapshot or backup.
+// instance's file share from a backup.
 type RestoreInstanceRequest struct {
-	// FileShare: Required. Name of the file share in the Cloud Filestore
-	// instance that the snapshot is being restored to.
+	// FileShare: Required. Name of the file share in the Filestore instance
+	// that the backup is being restored to.
 	FileShare string `json:"fileShare,omitempty"`
 
 	// SourceBackup: The resource name of the backup, in the format
@@ -1784,8 +1946,8 @@ type RevertInstanceRequest struct {
 	// TargetSnapshotId: Required. The snapshot resource ID, in the format
 	// 'my-snapshot', where the specified ID is the {snapshot_id} of the
 	// fully qualified name like
-	// projects/{project_id}/locations/{location_id}/instances/{instance_id}/
-	// snapshots/{snapshot_id}
+	// `projects/{project_id}/locations/{location_id}/instances/{instance_id}
+	// /snapshots/{snapshot_id}`
 	TargetSnapshotId string `json:"targetSnapshotId,omitempty"`
 
 	// ForceSendFields is a list of field names (e.g. "TargetSnapshotId") to
@@ -1857,10 +2019,17 @@ func (s *Schedule) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
-// Share: A Cloud Filestore share.
+// Share: A Filestore share.
 type Share struct {
-	// CapacityGb: File share capacity in gigabytes (GB). Cloud Filestore
-	// defines 1 GB as 1024^3 bytes. Must be greater than 0.
+	// Backup: Immutable. Full name of the Cloud Filestore Backup resource
+	// that this Share is restored from, in the format of
+	// projects/{project_id}/locations/{location_id}/backups/{backup_id}.
+	// Empty, if the Share is created from scratch and not restored from a
+	// backup.
+	Backup string `json:"backup,omitempty"`
+
+	// CapacityGb: File share capacity in gigabytes (GB). Filestore defines
+	// 1 GB as 1024^3 bytes. Must be greater than 0.
 	CapacityGb int64 `json:"capacityGb,omitempty,string"`
 
 	// CreateTime: Output only. The time when the share was created.
@@ -1900,7 +2069,7 @@ type Share struct {
 	// server.
 	googleapi.ServerResponse `json:"-"`
 
-	// ForceSendFields is a list of field names (e.g. "CapacityGb") to
+	// ForceSendFields is a list of field names (e.g. "Backup") to
 	// unconditionally include in API requests. By default, fields with
 	// empty or default values are omitted from API requests. However, any
 	// non-pointer, non-interface field appearing in ForceSendFields will be
@@ -1908,8 +2077,8 @@ type Share struct {
 	// This may be used to include empty fields in Patch requests.
 	ForceSendFields []string `json:"-"`
 
-	// NullFields is a list of field names (e.g. "CapacityGb") to include in
-	// API requests with the JSON null value. By default, fields with empty
+	// NullFields is a list of field names (e.g. "Backup") to include in API
+	// requests with the JSON null value. By default, fields with empty
 	// values are omitted from API requests. However, any field with an
 	// empty value appearing in NullFields will be sent to the server as
 	// null. It is an error if a field in this list has a non-empty value.
@@ -1923,7 +2092,7 @@ func (s *Share) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(raw, s.ForceSendFields, s.NullFields)
 }
 
-// Snapshot: A Cloud Filestore snapshot.
+// Snapshot: A Filestore snapshot.
 type Snapshot struct {
 	// CreateTime: Output only. The time when the snapshot was created.
 	CreateTime string `json:"createTime,omitempty"`
@@ -2076,12 +2245,26 @@ type UpdatePolicy struct {
 	//   "UPDATE_CHANNEL_UNSPECIFIED" - Unspecified channel.
 	//   "EARLIER" - Early channel within a customer project.
 	//   "LATER" - Later channel within a customer project.
+	//   "WEEK1" - ! ! The follow channels can ONLY be used if you adopt the
+	// new MW system! ! ! NOTE: all WEEK channels are assumed to be under a
+	// weekly window. ! There is currently no dedicated channel definitions
+	// for Daily windows. ! If you use Daily window, the system will assume
+	// a 1d (24Hours) advanced ! notification period b/w EARLY and LATER. !
+	// We may consider support more flexible daily channel specifications in
+	// ! the future. WEEK1 == EARLIER with minimum 7d advanced notification.
+	// {7d, 14d} The system will treat them equally and will use WEEK1
+	// whenever it can. New customers are encouraged to use this channel
+	// annotation.
+	//   "WEEK2" - WEEK2 == LATER with minimum 14d advanced notification
+	// {14d, 21d}.
+	//   "WEEK5" - WEEK5 == 40d support. minimum 35d advanced notification
+	// {35d, 42d}.
 	Channel string `json:"channel,omitempty"`
 
 	// DenyMaintenancePeriods: Deny Maintenance Period that is applied to
-	// resource to indicate when maintenance is forbidden. User can specify
-	// zero or more non-overlapping deny periods. Maximum number of
-	// deny_maintenance_periods expected is one.
+	// resource to indicate when maintenance is forbidden. The protocol
+	// supports zero-to-many such periods, but the current SLM Rollout
+	// implementation only supports zero-to-one.
 	DenyMaintenancePeriods []*DenyMaintenancePeriod `json:"denyMaintenancePeriods,omitempty"`
 
 	// Window: Optional. Maintenance window that is applied to resources
@@ -2235,17 +2418,17 @@ func (c *ProjectsLocationsGetCall) Do(opts ...googleapi.CallOption) (*Location, 
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Location{
 		ServerResponse: googleapi.ServerResponse{
@@ -2300,8 +2483,8 @@ type ProjectsLocationsListCall struct {
 // List: Lists information about the supported locations for this
 // service.
 //
-// - name: The resource that owns the locations collection, if
-//   applicable.
+//   - name: The resource that owns the locations collection, if
+//     applicable.
 func (r *ProjectsLocationsService) List(name string) *ProjectsLocationsListCall {
 	c := &ProjectsLocationsListCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -2415,17 +2598,17 @@ func (c *ProjectsLocationsListCall) Do(opts ...googleapi.CallOption) (*ListLocat
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &ListLocationsResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -2521,9 +2704,9 @@ type ProjectsLocationsBackupsCreateCall struct {
 
 // Create: Creates a backup.
 //
-// - parent: The backup's project and location, in the format
-//   `projects/{project_id}/locations/{location}`. In Cloud Filestore,
-//   backup locations map to GCP regions, for example **us-west1**.
+//   - parent: The backup's project and location, in the format
+//     `projects/{project_id}/locations/{location}`. In Filestore, backup
+//     locations map to Google Cloud regions, for example **us-west1**.
 func (r *ProjectsLocationsBackupsService) Create(parent string, backup *Backup) *ProjectsLocationsBackupsCreateCall {
 	c := &ProjectsLocationsBackupsCreateCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.parent = parent
@@ -2608,17 +2791,17 @@ func (c *ProjectsLocationsBackupsCreateCall) Do(opts ...googleapi.CallOption) (*
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -2646,7 +2829,7 @@ func (c *ProjectsLocationsBackupsCreateCall) Do(opts ...googleapi.CallOption) (*
 	//       "type": "string"
 	//     },
 	//     "parent": {
-	//       "description": "Required. The backup's project and location, in the format `projects/{project_id}/locations/{location}`. In Cloud Filestore, backup locations map to GCP regions, for example **us-west1**.",
+	//       "description": "Required. The backup's project and location, in the format `projects/{project_id}/locations/{location}`. In Filestore, backup locations map to Google Cloud regions, for example **us-west1**.",
 	//       "location": "path",
 	//       "pattern": "^projects/[^/]+/locations/[^/]+$",
 	//       "required": true,
@@ -2679,8 +2862,8 @@ type ProjectsLocationsBackupsDeleteCall struct {
 
 // Delete: Deletes a backup.
 //
-// - name: The backup resource name, in the format
-//   `projects/{project_id}/locations/{location}/backups/{backup_id}`.
+//   - name: The backup resource name, in the format
+//     `projects/{project_id}/locations/{location}/backups/{backup_id}`.
 func (r *ProjectsLocationsBackupsService) Delete(name string) *ProjectsLocationsBackupsDeleteCall {
 	c := &ProjectsLocationsBackupsDeleteCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -2749,17 +2932,17 @@ func (c *ProjectsLocationsBackupsDeleteCall) Do(opts ...googleapi.CallOption) (*
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -2813,8 +2996,8 @@ type ProjectsLocationsBackupsGetCall struct {
 
 // Get: Gets the details of a specific backup.
 //
-// - name: The backup resource name, in the format
-//   `projects/{project_id}/locations/{location}/backups/{backup_id}`.
+//   - name: The backup resource name, in the format
+//     `projects/{project_id}/locations/{location}/backups/{backup_id}`.
 func (r *ProjectsLocationsBackupsService) Get(name string) *ProjectsLocationsBackupsGetCall {
 	c := &ProjectsLocationsBackupsGetCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -2896,17 +3079,17 @@ func (c *ProjectsLocationsBackupsGetCall) Do(opts ...googleapi.CallOption) (*Bac
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Backup{
 		ServerResponse: googleapi.ServerResponse{
@@ -2961,12 +3144,12 @@ type ProjectsLocationsBackupsListCall struct {
 // List: Lists all backups in a project for either a specified location
 // or for all locations.
 //
-// - parent: The project and location for which to retrieve backup
-//   information, in the format
-//   `projects/{project_id}/locations/{location}`. In Cloud Filestore,
-//   backup locations map to GCP regions, for example **us-west1**. To
-//   retrieve backup information for all locations, use "-" for the
-//   `{location}` value.
+//   - parent: The project and location for which to retrieve backup
+//     information, in the format
+//     `projects/{project_id}/locations/{location}`. In Filestore, backup
+//     locations map to Google Cloud regions, for example **us-west1**. To
+//     retrieve backup information for all locations, use "-" for the
+//     `{location}` value.
 func (r *ProjectsLocationsBackupsService) List(parent string) *ProjectsLocationsBackupsListCall {
 	c := &ProjectsLocationsBackupsListCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.parent = parent
@@ -3076,17 +3259,17 @@ func (c *ProjectsLocationsBackupsListCall) Do(opts ...googleapi.CallOption) (*Li
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &ListBackupsResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -3130,7 +3313,7 @@ func (c *ProjectsLocationsBackupsListCall) Do(opts ...googleapi.CallOption) (*Li
 	//       "type": "string"
 	//     },
 	//     "parent": {
-	//       "description": "Required. The project and location for which to retrieve backup information, in the format `projects/{project_id}/locations/{location}`. In Cloud Filestore, backup locations map to GCP regions, for example **us-west1**. To retrieve backup information for all locations, use \"-\" for the `{location}` value.",
+	//       "description": "Required. The project and location for which to retrieve backup information, in the format `projects/{project_id}/locations/{location}`. In Filestore, backup locations map to Google Cloud regions, for example **us-west1**. To retrieve backup information for all locations, use \"-\" for the `{location}` value.",
 	//       "location": "path",
 	//       "pattern": "^projects/[^/]+/locations/[^/]+$",
 	//       "required": true,
@@ -3182,8 +3365,8 @@ type ProjectsLocationsBackupsPatchCall struct {
 
 // Patch: Updates the settings of a specific backup.
 //
-// - name: Output only. The resource name of the backup, in the format
-//   `projects/{project_id}/locations/{location_id}/backups/{backup_id}`.
+//   - name: Output only. The resource name of the backup, in the format
+//     `projects/{project_id}/locations/{location_id}/backups/{backup_id}`.
 func (r *ProjectsLocationsBackupsService) Patch(name string, backup *Backup) *ProjectsLocationsBackupsPatchCall {
 	c := &ProjectsLocationsBackupsPatchCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -3266,17 +3449,17 @@ func (c *ProjectsLocationsBackupsPatchCall) Do(opts ...googleapi.CallOption) (*O
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -3342,9 +3525,9 @@ type ProjectsLocationsInstancesCreateCall struct {
 // capacity of the backup (and also equal to or larger than the minimum
 // capacity of the tier).
 //
-// - parent: The instance's project and location, in the format
-//   `projects/{project_id}/locations/{location}`. In Cloud Filestore,
-//   locations map to GCP zones, for example **us-west1-b**.
+//   - parent: The instance's project and location, in the format
+//     `projects/{project_id}/locations/{location}`. In Filestore,
+//     locations map to Google Cloud zones, for example **us-west1-b**.
 func (r *ProjectsLocationsInstancesService) Create(parent string, instance *Instance) *ProjectsLocationsInstancesCreateCall {
 	c := &ProjectsLocationsInstancesCreateCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.parent = parent
@@ -3429,17 +3612,17 @@ func (c *ProjectsLocationsInstancesCreateCall) Do(opts ...googleapi.CallOption) 
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -3467,7 +3650,7 @@ func (c *ProjectsLocationsInstancesCreateCall) Do(opts ...googleapi.CallOption) 
 	//       "type": "string"
 	//     },
 	//     "parent": {
-	//       "description": "Required. The instance's project and location, in the format `projects/{project_id}/locations/{location}`. In Cloud Filestore, locations map to GCP zones, for example **us-west1-b**.",
+	//       "description": "Required. The instance's project and location, in the format `projects/{project_id}/locations/{location}`. In Filestore, locations map to Google Cloud zones, for example **us-west1-b**.",
 	//       "location": "path",
 	//       "pattern": "^projects/[^/]+/locations/[^/]+$",
 	//       "required": true,
@@ -3500,8 +3683,8 @@ type ProjectsLocationsInstancesDeleteCall struct {
 
 // Delete: Deletes an instance.
 //
-// - name: The instance resource name, in the format
-//   `projects/{project_id}/locations/{location}/instances/{instance_id}`.
+//   - name: The instance resource name, in the format
+//     `projects/{project_id}/locations/{location}/instances/{instance_id}`.
 func (r *ProjectsLocationsInstancesService) Delete(name string) *ProjectsLocationsInstancesDeleteCall {
 	c := &ProjectsLocationsInstancesDeleteCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -3578,17 +3761,17 @@ func (c *ProjectsLocationsInstancesDeleteCall) Do(opts ...googleapi.CallOption) 
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -3647,9 +3830,9 @@ type ProjectsLocationsInstancesGetCall struct {
 
 // Get: Gets the details of a specific instance.
 //
-// - name: The instance resource name, in the format
-//   `projects/{project_id}/locations/{location}/instances/{instance_id}`
-//   .
+//   - name: The instance resource name, in the format
+//     `projects/{project_id}/locations/{location}/instances/{instance_id}`
+//     .
 func (r *ProjectsLocationsInstancesService) Get(name string) *ProjectsLocationsInstancesGetCall {
 	c := &ProjectsLocationsInstancesGetCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -3731,17 +3914,17 @@ func (c *ProjectsLocationsInstancesGetCall) Do(opts ...googleapi.CallOption) (*I
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Instance{
 		ServerResponse: googleapi.ServerResponse{
@@ -3796,12 +3979,12 @@ type ProjectsLocationsInstancesListCall struct {
 // List: Lists all instances in a project for either a specified
 // location or for all locations.
 //
-// - parent: The project and location for which to retrieve instance
-//   information, in the format
-//   `projects/{project_id}/locations/{location}`. In Cloud Filestore,
-//   locations map to GCP zones, for example **us-west1-b**. To retrieve
-//   instance information for all locations, use "-" for the
-//   `{location}` value.
+//   - parent: The project and location for which to retrieve instance
+//     information, in the format
+//     `projects/{project_id}/locations/{location}`. In Cloud Filestore,
+//     locations map to Google Cloud zones, for example **us-west1-b**. To
+//     retrieve instance information for all locations, use "-" for the
+//     `{location}` value.
 func (r *ProjectsLocationsInstancesService) List(parent string) *ProjectsLocationsInstancesListCall {
 	c := &ProjectsLocationsInstancesListCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.parent = parent
@@ -3911,17 +4094,17 @@ func (c *ProjectsLocationsInstancesListCall) Do(opts ...googleapi.CallOption) (*
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &ListInstancesResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -3965,7 +4148,7 @@ func (c *ProjectsLocationsInstancesListCall) Do(opts ...googleapi.CallOption) (*
 	//       "type": "string"
 	//     },
 	//     "parent": {
-	//       "description": "Required. The project and location for which to retrieve instance information, in the format `projects/{project_id}/locations/{location}`. In Cloud Filestore, locations map to GCP zones, for example **us-west1-b**. To retrieve instance information for all locations, use \"-\" for the `{location}` value.",
+	//       "description": "Required. The project and location for which to retrieve instance information, in the format `projects/{project_id}/locations/{location}`. In Cloud Filestore, locations map to Google Cloud zones, for example **us-west1-b**. To retrieve instance information for all locations, use \"-\" for the `{location}` value.",
 	//       "location": "path",
 	//       "pattern": "^projects/[^/]+/locations/[^/]+$",
 	//       "required": true,
@@ -4017,9 +4200,9 @@ type ProjectsLocationsInstancesPatchCall struct {
 
 // Patch: Updates the settings of a specific instance.
 //
-// - name: Output only. The resource name of the instance, in the format
-//   `projects/{project_id}/locations/{location_id}/instances/{instance_i
-//   d}`.
+//   - name: Output only. The resource name of the instance, in the format
+//     `projects/{project_id}/locations/{location_id}/instances/{instance_i
+//     d}`.
 func (r *ProjectsLocationsInstancesService) Patch(name string, instance *Instance) *ProjectsLocationsInstancesPatchCall {
 	c := &ProjectsLocationsInstancesPatchCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -4103,17 +4286,17 @@ func (c *ProjectsLocationsInstancesPatchCall) Do(opts ...googleapi.CallOption) (
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -4179,9 +4362,9 @@ type ProjectsLocationsInstancesRestoreCall struct {
 // capacity of the backup (and also equal to or larger than the minimum
 // capacity of the tier).
 //
-// - name: The resource name of the instance, in the format
-//   `projects/{project_id}/locations/{location_id}/instances/{instance_i
-//   d}`.
+//   - name: The resource name of the instance, in the format
+//     `projects/{project_id}/locations/{location_id}/instances/{instance_i
+//     d}`.
 func (r *ProjectsLocationsInstancesService) Restore(name string, restoreinstancerequest *RestoreInstanceRequest) *ProjectsLocationsInstancesRestoreCall {
 	c := &ProjectsLocationsInstancesRestoreCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -4256,17 +4439,17 @@ func (c *ProjectsLocationsInstancesRestoreCall) Do(opts ...googleapi.CallOption)
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -4324,9 +4507,9 @@ type ProjectsLocationsInstancesRevertCall struct {
 // Revert: Revert an existing instance's file system to a specified
 // snapshot.
 //
-// - name:
-//   projects/{project_id}/locations/{location_id}/instances/{instance_id
-//   }. The resource name of the instance, in the format.
+//   - name:
+//     `projects/{project_id}/locations/{location_id}/instances/{instance_i
+//     d}`. The resource name of the instance, in the format.
 func (r *ProjectsLocationsInstancesService) Revert(name string, revertinstancerequest *RevertInstanceRequest) *ProjectsLocationsInstancesRevertCall {
 	c := &ProjectsLocationsInstancesRevertCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -4401,17 +4584,17 @@ func (c *ProjectsLocationsInstancesRevertCall) Do(opts ...googleapi.CallOption) 
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -4434,7 +4617,7 @@ func (c *ProjectsLocationsInstancesRevertCall) Do(opts ...googleapi.CallOption) 
 	//   ],
 	//   "parameters": {
 	//     "name": {
-	//       "description": "Required. projects/{project_id}/locations/{location_id}/instances/{instance_id}. The resource name of the instance, in the format",
+	//       "description": "Required. `projects/{project_id}/locations/{location_id}/instances/{instance_id}`. The resource name of the instance, in the format",
 	//       "location": "path",
 	//       "pattern": "^projects/[^/]+/locations/[^/]+/instances/[^/]+$",
 	//       "required": true,
@@ -4468,9 +4651,9 @@ type ProjectsLocationsInstancesSharesCreateCall struct {
 
 // Create: Creates a share.
 //
-// - parent: The Filestore Instance to create the share for, in the
-//   format
-//   `projects/{project_id}/locations/{location}/instances/{instance_id}`.
+//   - parent: The Filestore Instance to create the share for, in the
+//     format
+//     `projects/{project_id}/locations/{location}/instances/{instance_id}`.
 func (r *ProjectsLocationsInstancesSharesService) Create(parent string, share *Share) *ProjectsLocationsInstancesSharesCreateCall {
 	c := &ProjectsLocationsInstancesSharesCreateCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.parent = parent
@@ -4555,17 +4738,17 @@ func (c *ProjectsLocationsInstancesSharesCreateCall) Do(opts ...googleapi.CallOp
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -4626,9 +4809,9 @@ type ProjectsLocationsInstancesSharesDeleteCall struct {
 
 // Delete: Deletes a share.
 //
-// - name: The share resource name, in the format
-//   `projects/{project_id}/locations/{location}/instances/{instance_id}/
-//   share/{share_id}`.
+//   - name: The share resource name, in the format
+//     `projects/{project_id}/locations/{location}/instances/{instance_id}/
+//     share/{share_id}`.
 func (r *ProjectsLocationsInstancesSharesService) Delete(name string) *ProjectsLocationsInstancesSharesDeleteCall {
 	c := &ProjectsLocationsInstancesSharesDeleteCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -4697,17 +4880,17 @@ func (c *ProjectsLocationsInstancesSharesDeleteCall) Do(opts ...googleapi.CallOp
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -4761,9 +4944,9 @@ type ProjectsLocationsInstancesSharesGetCall struct {
 
 // Get: Gets the details of a specific share.
 //
-// - name: The share resource name, in the format
-//   `projects/{project_id}/locations/{location}/instances/{instance_id}/
-//   shares/{share_id}`.
+//   - name: The share resource name, in the format
+//     `projects/{project_id}/locations/{location}/instances/{instance_id}/
+//     shares/{share_id}`.
 func (r *ProjectsLocationsInstancesSharesService) Get(name string) *ProjectsLocationsInstancesSharesGetCall {
 	c := &ProjectsLocationsInstancesSharesGetCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -4845,17 +5028,17 @@ func (c *ProjectsLocationsInstancesSharesGetCall) Do(opts ...googleapi.CallOptio
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Share{
 		ServerResponse: googleapi.ServerResponse{
@@ -4909,10 +5092,10 @@ type ProjectsLocationsInstancesSharesListCall struct {
 
 // List: Lists all shares for a specified instance.
 //
-// - parent: The instance for which to retrieve share information, in
-//   the format
-//   `projects/{project_id}/locations/{location}/instances/{instance_id}`
-//   .
+//   - parent: The instance for which to retrieve share information, in
+//     the format
+//     `projects/{project_id}/locations/{location}/instances/{instance_id}`
+//     .
 func (r *ProjectsLocationsInstancesSharesService) List(parent string) *ProjectsLocationsInstancesSharesListCall {
 	c := &ProjectsLocationsInstancesSharesListCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.parent = parent
@@ -5022,17 +5205,17 @@ func (c *ProjectsLocationsInstancesSharesListCall) Do(opts ...googleapi.CallOpti
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &ListSharesResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -5128,9 +5311,9 @@ type ProjectsLocationsInstancesSharesPatchCall struct {
 
 // Patch: Updates the settings of a specific share.
 //
-// - name: Output only. The resource name of the share, in the format
-//   `projects/{project_id}/locations/{location_id}/instances/{instance_i
-//   d}/shares/{share_id}`.
+//   - name: Output only. The resource name of the share, in the format
+//     `projects/{project_id}/locations/{location_id}/instances/{instance_i
+//     d}/shares/{share_id}`.
 func (r *ProjectsLocationsInstancesSharesService) Patch(name string, share *Share) *ProjectsLocationsInstancesSharesPatchCall {
 	c := &ProjectsLocationsInstancesSharesPatchCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -5215,17 +5398,17 @@ func (c *ProjectsLocationsInstancesSharesPatchCall) Do(opts ...googleapi.CallOpt
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -5288,9 +5471,9 @@ type ProjectsLocationsInstancesSnapshotsCreateCall struct {
 
 // Create: Creates a snapshot.
 //
-// - parent: The Filestore Instance to create the snapshots of, in the
-//   format
-//   `projects/{project_id}/locations/{location}/instances/{instance_id}`.
+//   - parent: The Filestore Instance to create the snapshots of, in the
+//     format
+//     `projects/{project_id}/locations/{location}/instances/{instance_id}`.
 func (r *ProjectsLocationsInstancesSnapshotsService) Create(parent string, snapshot *Snapshot) *ProjectsLocationsInstancesSnapshotsCreateCall {
 	c := &ProjectsLocationsInstancesSnapshotsCreateCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.parent = parent
@@ -5375,17 +5558,17 @@ func (c *ProjectsLocationsInstancesSnapshotsCreateCall) Do(opts ...googleapi.Cal
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -5446,9 +5629,9 @@ type ProjectsLocationsInstancesSnapshotsDeleteCall struct {
 
 // Delete: Deletes a snapshot.
 //
-// - name: The snapshot resource name, in the format
-//   `projects/{project_id}/locations/{location}/instances/{instance_id}/
-//   snapshots/{snapshot_id}`.
+//   - name: The snapshot resource name, in the format
+//     `projects/{project_id}/locations/{location}/instances/{instance_id}/
+//     snapshots/{snapshot_id}`.
 func (r *ProjectsLocationsInstancesSnapshotsService) Delete(name string) *ProjectsLocationsInstancesSnapshotsDeleteCall {
 	c := &ProjectsLocationsInstancesSnapshotsDeleteCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -5517,17 +5700,17 @@ func (c *ProjectsLocationsInstancesSnapshotsDeleteCall) Do(opts ...googleapi.Cal
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -5581,9 +5764,9 @@ type ProjectsLocationsInstancesSnapshotsGetCall struct {
 
 // Get: Gets the details of a specific snapshot.
 //
-// - name: The snapshot resource name, in the format
-//   `projects/{project_id}/locations/{location}/instances/{instance_id}/
-//   snapshots/{snapshot_id}`.
+//   - name: The snapshot resource name, in the format
+//     `projects/{project_id}/locations/{location}/instances/{instance_id}/
+//     snapshots/{snapshot_id}`.
 func (r *ProjectsLocationsInstancesSnapshotsService) Get(name string) *ProjectsLocationsInstancesSnapshotsGetCall {
 	c := &ProjectsLocationsInstancesSnapshotsGetCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -5665,17 +5848,17 @@ func (c *ProjectsLocationsInstancesSnapshotsGetCall) Do(opts ...googleapi.CallOp
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Snapshot{
 		ServerResponse: googleapi.ServerResponse{
@@ -5730,10 +5913,10 @@ type ProjectsLocationsInstancesSnapshotsListCall struct {
 // List: Lists all snapshots in a project for either a specified
 // location or for all locations.
 //
-// - parent: The instance for which to retrieve snapshot information, in
-//   the format
-//   `projects/{project_id}/locations/{location}/instances/{instance_id}`
-//   .
+//   - parent: The instance for which to retrieve snapshot information, in
+//     the format
+//     `projects/{project_id}/locations/{location}/instances/{instance_id}`
+//     .
 func (r *ProjectsLocationsInstancesSnapshotsService) List(parent string) *ProjectsLocationsInstancesSnapshotsListCall {
 	c := &ProjectsLocationsInstancesSnapshotsListCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.parent = parent
@@ -5843,17 +6026,17 @@ func (c *ProjectsLocationsInstancesSnapshotsListCall) Do(opts ...googleapi.CallO
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &ListSnapshotsResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -5949,9 +6132,9 @@ type ProjectsLocationsInstancesSnapshotsPatchCall struct {
 
 // Patch: Updates the settings of a specific snapshot.
 //
-// - name: Output only. The resource name of the snapshot, in the format
-//   `projects/{project_id}/locations/{location_id}/instances/{instance_i
-//   d}/snapshots/{snapshot_id}`.
+//   - name: Output only. The resource name of the snapshot, in the format
+//     `projects/{project_id}/locations/{location_id}/instances/{instance_i
+//     d}/snapshots/{snapshot_id}`.
 func (r *ProjectsLocationsInstancesSnapshotsService) Patch(name string, snapshot *Snapshot) *ProjectsLocationsInstancesSnapshotsPatchCall {
 	c := &ProjectsLocationsInstancesSnapshotsPatchCall{s: r.s, urlParams_: make(gensupport.URLParams)}
 	c.name = name
@@ -6034,17 +6217,17 @@ func (c *ProjectsLocationsInstancesSnapshotsPatchCall) Do(opts ...googleapi.Call
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -6191,17 +6374,17 @@ func (c *ProjectsLocationsOperationsCancelCall) Do(opts ...googleapi.CallOption)
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Empty{
 		ServerResponse: googleapi.ServerResponse{
@@ -6329,17 +6512,17 @@ func (c *ProjectsLocationsOperationsDeleteCall) Do(opts ...googleapi.CallOption)
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Empty{
 		ServerResponse: googleapi.ServerResponse{
@@ -6477,17 +6660,17 @@ func (c *ProjectsLocationsOperationsGetCall) Do(opts ...googleapi.CallOption) (*
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &Operation{
 		ServerResponse: googleapi.ServerResponse{
@@ -6541,14 +6724,7 @@ type ProjectsLocationsOperationsListCall struct {
 
 // List: Lists operations that match the specified filter in the
 // request. If the server doesn't support this method, it returns
-// `UNIMPLEMENTED`. NOTE: the `name` binding allows API services to
-// override the binding to use different resource name schemes, such as
-// `users/*/operations`. To override the binding, API services can add a
-// binding such as "/v1/{name=users/*}/operations" to their service
-// configuration. For backwards compatibility, the default name includes
-// the operations collection id, however overriding users must ensure
-// the name binding is the parent resource, without the operations
-// collection id.
+// `UNIMPLEMENTED`.
 //
 // - name: The name of the operation's parent resource.
 func (r *ProjectsLocationsOperationsService) List(name string) *ProjectsLocationsOperationsListCall {
@@ -6653,17 +6829,17 @@ func (c *ProjectsLocationsOperationsListCall) Do(opts ...googleapi.CallOption) (
 		if res.Body != nil {
 			res.Body.Close()
 		}
-		return nil, &googleapi.Error{
+		return nil, gensupport.WrapError(&googleapi.Error{
 			Code:   res.StatusCode,
 			Header: res.Header,
-		}
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
 	defer googleapi.CloseBody(res)
 	if err := googleapi.CheckResponse(res); err != nil {
-		return nil, err
+		return nil, gensupport.WrapError(err)
 	}
 	ret := &ListOperationsResponse{
 		ServerResponse: googleapi.ServerResponse{
@@ -6677,7 +6853,7 @@ func (c *ProjectsLocationsOperationsListCall) Do(opts ...googleapi.CallOption) (
 	}
 	return ret, nil
 	// {
-	//   "description": "Lists operations that match the specified filter in the request. If the server doesn't support this method, it returns `UNIMPLEMENTED`. NOTE: the `name` binding allows API services to override the binding to use different resource name schemes, such as `users/*/operations`. To override the binding, API services can add a binding such as `\"/v1/{name=users/*}/operations\"` to their service configuration. For backwards compatibility, the default name includes the operations collection id, however overriding users must ensure the name binding is the parent resource, without the operations collection id.",
+	//   "description": "Lists operations that match the specified filter in the request. If the server doesn't support this method, it returns `UNIMPLEMENTED`.",
 	//   "flatPath": "v1beta1/projects/{projectsId}/locations/{locationsId}/operations",
 	//   "httpMethod": "GET",
 	//   "id": "file.projects.locations.operations.list",
