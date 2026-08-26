@@ -20,9 +20,9 @@ require (
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.10.0
-	golang.org/x/net v0.41.0
+	golang.org/x/net v0.42.0
 	golang.org/x/oauth2 v0.30.0
-	golang.org/x/sys v0.33.0
+	golang.org/x/sys v0.35.0
 	golang.org/x/time v0.9.0
 	google.golang.org/api v0.216.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250707201910-8d1bb00bc6a7
@@ -99,10 +99,10 @@ require (
 	go.opentelemetry.io/otel/trace v1.37.0 // indirect
 	go.uber.org/atomic v1.10.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/crypto v0.39.0 // indirect
-	golang.org/x/sync v0.15.0 // indirect
-	golang.org/x/term v0.32.0 // indirect
-	golang.org/x/text v0.26.0 // indirect
+	golang.org/x/crypto v0.41.0 // indirect
+	golang.org/x/sync v0.16.0 // indirect
+	golang.org/x/term v0.34.0 // indirect
+	golang.org/x/text v0.28.0 // indirect
 	google.golang.org/genproto v0.0.0-20241021214115-324edc3d5d38 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
@@ -123,3 +123,5 @@ replace k8s.io/client-go => k8s.io/client-go v0.26.0
 // CVE-2026-33186: Use backported gRPC fix for authorization bypass
 // Using openshift-sustaining fork with security patches
 replace google.golang.org/grpc => github.com/openshift-sustaining/grpc-go v1.75.1-sec.1
+
+replace golang.org/x/net => github.com/openshift-sustaining/net v0.43.0-sec.4
