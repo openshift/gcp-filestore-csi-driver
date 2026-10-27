@@ -1,0 +1,96 @@
+# Controller Deployment patch for GKE Substrate Agent integration with GCP Filestore CSI Driver.
+#
+# Key Features & Rationale:
+# 1. hostNetwork: false
+#    - Disables host networking on the controller pod so GKE Workload Identity metadata server
+#      interception works properly, allowing the pod to authenticate as its annotated GCP Service Account.
+#
+# 2. role: controller-plugin label
+#    - Differentiates controller pods from node daemonset pods so the csi-filestore-controller
+#      Kubernetes Service only routes gRPC control-plane traffic to this controller.
+#
+# 3. envoy mTLS proxy sidecar container (TCP port 10000 -> Unix socket /csi/csi.sock)
+#    - Substrate's ate-api-server communicates with CSI drivers over mTLS gRPC network sockets.
+#      Because the CSI driver natively listens on a local Unix domain socket, this Envoy 
+#      proxy intercepts mTLS traffic on TCP port 10000 and forwards it to the Unix socket.
+#
+# 4. --feature-volume-pools=true
+#    - Enables VolumePool capacity management and volume claim/provisioning logic.
+#
+# 5. Workload Identity Cleanup ($patch: delete)
+#    - Removes static secret volume mounts (cloud-sa-volume) and GOOGLE_APPLICATION_CREDENTIALS
+#      env variables in favor of dynamic, short-lived OAuth tokens via GKE Workload Identity.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gcp-filestore-csi-controller
+  namespace: gcp-filestore-csi-driver
+  labels:
+    role: controller-plugin
+spec:
+  template:
+    metadata:
+      labels:
+        role: controller-plugin
+    spec:
+      hostNetwork: false
+      # Remove static Service Account key secret volume; authentication is handled via GKE Workload Identity
+      volumes:
+      - name: cloud-sa-volume
+        $patch: delete
+      - name: envoy-config
+        configMap:
+          name: csi-envoy-config
+      - name: servicedns-certs
+        projected:
+          sources:
+          - podCertificate:
+              signerName: servicedns.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+      - name: podidentity-ca
+        projected:
+          sources:
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+      containers:
+      # envoy mTLS proxy sidecar intercepts traffic on port 10000 to the local Unix CSI domain socket for Substrate control plane
+      - name: envoy
+        image: envoyproxy/envoy:v1.34-latest
+        command: ["/usr/local/bin/envoy"]
+        args: ["-c", "/etc/envoy/envoy.yaml"]
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: envoy-config
+          mountPath: /etc/envoy
+        - name: socket-dir
+          mountPath: /csi
+        - name: servicedns-certs
+          mountPath: /run/servicedns
+          readOnly: true
+        - name: podidentity-ca
+          mountPath: /run/podidentity-ca
+          readOnly: true
+      - name: gcp-filestore-driver
+        volumeMounts:
+        # Explicitly retain socket-dir mount for CSI operations
+        - name: socket-dir
+          mountPath: /csi
+        # Remove static SA key secret mount
+        - name: cloud-sa-volume
+          $patch: delete
+        env:
+        # Remove GOOGLE_APPLICATION_CREDENTIALS for dynamic Workload Identity token discovery
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          $patch: delete
+        args:
+        - "--v=4"
+        - "--endpoint=unix:/csi/csi.sock"
+        - "--controller=true"
+        - "--feature-volume-pools=true"

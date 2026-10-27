@@ -27,6 +27,7 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/genproto/googleapis/rpc/code"
 	"google.golang.org/grpc/codes"
+	"strings"
 )
 
 const (
@@ -44,6 +45,7 @@ type fakeServiceManager struct {
 	createdMultishareInstance map[string]*MultishareInstance
 	createdMultishares        map[string]*Share
 	multishareops             []*filev1beta1multishare.Operation
+	allocatedVolumes          map[string]*PoolVolume // key: volumeURI
 }
 
 var _ Service = &fakeServiceManager{}
@@ -54,6 +56,7 @@ func NewFakeService() (Service, error) {
 		backups:                   map[string]*Backup{},
 		createdMultishareInstance: make(map[string]*MultishareInstance),
 		createdMultishares:        make(map[string]*Share),
+		allocatedVolumes:          make(map[string]*PoolVolume),
 	}, nil
 }
 
@@ -64,6 +67,7 @@ func NewFakeServiceForMultishare(instances []*MultishareInstance, shares []*Shar
 		createdMultishareInstance: make(map[string]*MultishareInstance),
 		createdMultishares:        make(map[string]*Share),
 		multishareops:             make([]*filev1beta1multishare.Operation, 0),
+		allocatedVolumes:          make(map[string]*PoolVolume),
 	}
 
 	for _, instance := range instances {
@@ -528,4 +532,43 @@ func (manager *fakeBlockingServiceManager) IsOpDone(*filev1beta1multishare.Opera
 	}
 
 	return !val.ReportRunning, nil
+}
+
+func (manager *fakeServiceManager) CreateVolumePoolVolume(ctx context.Context, parentPool string, volumeID string) (*PoolVolume, error) {
+	if manager.allocatedVolumes == nil {
+		manager.allocatedVolumes = make(map[string]*PoolVolume)
+	}
+
+	volumeURI := fmt.Sprintf("%s/volumes/%s", parentPool, volumeID)
+	if vol, exists := manager.allocatedVolumes[volumeURI]; exists {
+		return vol, nil
+	}
+
+	if strings.Contains(parentPool, "exhausted") {
+		return nil, &googleapi.Error{
+			Code:    429,
+			Message: "no available volumes in the pool",
+		}
+	}
+
+	vol := &PoolVolume{
+		Name:      volumeURI,
+		IpAddress: "10.1.1.1",
+		MountName: fmt.Sprintf("vol_%s", volumeID),
+	}
+	manager.allocatedVolumes[volumeURI] = vol
+	return vol, nil
+}
+
+func (manager *fakeServiceManager) DeleteVolumePoolVolume(ctx context.Context, name string) error {
+	if manager.allocatedVolumes == nil {
+		manager.allocatedVolumes = make(map[string]*PoolVolume)
+	}
+
+	if _, ok := manager.allocatedVolumes[name]; ok {
+		delete(manager.allocatedVolumes, name)
+		return nil
+	}
+
+	return nil
 }

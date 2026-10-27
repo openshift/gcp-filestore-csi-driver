@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Build driver go binary
-FROM --platform=$BUILDPLATFORM golang:1.26.1 as builder
+FROM --platform=$BUILDPLATFORM golang:1.26.4 as builder
 
 ARG STAGINGVERSION
 ARG TARGETPLATFORM
@@ -25,7 +25,7 @@ RUN GOARCH=$(echo $TARGETPLATFORM | cut -f2 -d '/') make driver BINDIR=/bin GCP_
 # Install nfs packages
 # Note that the newer debian bullseye image does not work with nfs-common; I
 # believe that libcap needs extra configuration.
-FROM gke.gcr.io/debian-base:bookworm-v1.0.5-gke.11 as deps
+FROM gke.gcr.io/debian-base:bookworm-v1.0.7-gke.2 as deps
 ENV DEBIAN_FRONTEND noninteractive
 
 # The netbase package is needed to get rpcbind to work correctly,

@@ -104,6 +104,11 @@ type GCFSDriverFeatureOptions struct {
 	FeatureMultishareBackups        *FeatureMultishareBackups
 	FeatureNFSExportOptionsOnCreate *FeatureNFSExportOptionsOnCreate
 	FeatureNFSv4Support             *FeatureNFSv4Support
+	FeatureVolumePools              *FeatureVolumePools
+}
+
+type FeatureVolumePools struct {
+	Enabled bool
 }
 
 type FeatureMultishareBackups struct {

@@ -67,8 +67,9 @@ const (
 	premiumTierMinSize       = 25 * util.Tb / 10
 	premiumTierMaxSize       = 639 * util.Tb / 10
 
-	directPeering        = "DIRECT_PEERING"
-	privateServiceAccess = "PRIVATE_SERVICE_ACCESS"
+	directPeering         = "DIRECT_PEERING"
+	privateServiceAccess  = "PRIVATE_SERVICE_ACCESS"
+	privateServiceConnect = "PRIVATE_SERVICE_CONNECT"
 
 	// Keys for Topology.
 	TopologyKeyZone = "topology.gke.io/zone"
@@ -204,6 +205,14 @@ func (m *controllerServer) Run(stopCh <-chan struct{}) {
 
 // CreateVolume creates a GCFS instance
 func (s *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
+	volumePoolPath := req.GetParameters()[paramKeyVolumePool]
+	if volumePoolPath != "" {
+		if s.config.features.FeatureVolumePools == nil || !s.config.features.FeatureVolumePools.Enabled {
+			return nil, status.Error(codes.FailedPrecondition, "cannot create volume pool volume: Volume Pools feature is disabled")
+		}
+		return s.handleCreateVolumePoolVolume(ctx, req, volumePoolPath)
+	}
+
 	if strings.ToLower(req.GetParameters()[paramMultishare]) == "true" {
 		if s.config.multiShareController == nil {
 			return nil, status.Error(codes.InvalidArgument, "multishare controller not enabled")
@@ -427,6 +436,13 @@ func (s *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolu
 		return nil, status.Error(codes.InvalidArgument, "volume id is empty")
 	}
 
+	if isVolumePoolVolumeID(volumeID) {
+		if s.config.features.FeatureVolumePools == nil || !s.config.features.FeatureVolumePools.Enabled {
+			return nil, status.Errorf(codes.FailedPrecondition, "cannot delete volume pool volume %q: Volume Pools feature is disabled", volumeID)
+		}
+		return s.handleDeleteVolumePoolVolume(ctx, req, volumeID)
+	}
+
 	if isMultishareVolId(volumeID) {
 		if s.config.multiShareController == nil {
 			return nil, status.Error(codes.InvalidArgument, "multishare controller not enabled")
@@ -540,6 +556,10 @@ func (s *controllerServer) ControllerModifyVolume(ctx context.Context, req *csi.
 	volumeID := req.GetVolumeId()
 	if len(volumeID) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID cannot be empty")
+	}
+
+	if isVolumePoolVolumeID(volumeID) {
+		return nil, status.Error(codes.InvalidArgument, "ControllerModifyVolume is not supported for volumepool volumes")
 	}
 
 	params := req.GetMutableParameters()
@@ -730,6 +750,8 @@ func (s *controllerServer) generateNewFileInstance(name string, capBytes int64, 
 	var nfsExportOptions []*file.NfsExportOptions
 	network := defaultNetwork
 	connectMode := directPeering
+	reservedIPRange := ""
+	reservedIPV4CIDR := ""
 	kmsKeyName := ""
 	fileProtocol := ""
 
@@ -758,16 +780,15 @@ func (s *controllerServer) generateNewFileInstance(name string, capBytes int64, 
 			network = v
 		case ParamConnectMode:
 			connectMode = v
-			if connectMode != directPeering && connectMode != privateServiceAccess {
-				return nil, fmt.Errorf("connect mode can only be one of %q or %q", directPeering, privateServiceAccess)
+			if connectMode != directPeering && connectMode != privateServiceAccess && connectMode != privateServiceConnect {
+				return nil, fmt.Errorf("connect mode can only be one of %q, %q or %q", directPeering, privateServiceAccess, privateServiceConnect)
 			}
 		case ParamInstanceEncryptionKmsKey:
 			kmsKeyName = v
-		// Ignore the cidr flag as it is not passed to the cloud provider
-		// It will be used to get unreserved IP in the reserveIPV4Range function
-		// ignore IPRange flag as it will be handled at the same place as cidr
-		case ParamReservedIPV4CIDR, ParamReservedIPRange:
-			continue
+		case ParamReservedIPV4CIDR:
+			reservedIPV4CIDR = v
+		case ParamReservedIPRange:
+			reservedIPRange = v
 		case cloud.ParameterKeyResourceTags:
 			continue
 		case paramFileProtocol:
@@ -779,6 +800,13 @@ func (s *controllerServer) generateNewFileInstance(name string, capBytes int64, 
 		default:
 			return nil, fmt.Errorf("invalid parameter %q", k)
 		}
+	}
+
+	if connectMode == privateServiceConnect &&
+		(reservedIPRange != "" || reservedIPV4CIDR != "") {
+		return nil, fmt.Errorf(
+			"reserved IP range parameters cannot be used with PRIVATE_SERVICE_CONNECT",
+		)
 	}
 
 	switch fileProtocol {
@@ -863,6 +891,10 @@ func (s *controllerServer) ControllerExpandVolume(ctx context.Context, req *csi.
 	volumeID := req.GetVolumeId()
 	if volumeID == "" {
 		return nil, status.Error(codes.InvalidArgument, "ControllerExpandVolume volume ID must be provided")
+	}
+
+	if isVolumePoolVolumeID(volumeID) {
+		return nil, status.Error(codes.InvalidArgument, "ControllerExpandVolume is not supported for volumepool volumes")
 	}
 
 	if isMultishareVolId(volumeID) {
@@ -1083,6 +1115,10 @@ func (s *controllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSn
 	volumeID := req.GetSourceVolumeId()
 	if len(volumeID) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "CreateSnapshot source volume ID must be provided")
+	}
+
+	if isVolumePoolVolumeID(volumeID) {
+		return nil, status.Error(codes.InvalidArgument, "CreateSnapshot is not supported for volumepool volumes")
 	}
 	if isMultishareVolId(volumeID) {
 		if s.config.multiShareController == nil {

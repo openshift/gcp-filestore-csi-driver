@@ -17,6 +17,7 @@ limitations under the License.
 package file
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -75,6 +76,23 @@ type Share struct {
 	CapacityBytes    int64
 	BackupId         string
 	NfsExportOptions []*NfsExportOptions
+}
+
+type PoolVolume struct {
+	Name      string
+	IpAddress string
+	MountName string
+}
+
+type VolumePoolMountPoint struct {
+	IpAddress string `json:"ipAddress,omitempty"`
+	MountName string `json:"mountName,omitempty"`
+}
+
+type VolumePoolVolume struct {
+	Name        string                `json:"name,omitempty"`
+	Description string                `json:"description,omitempty"`
+	MountPoint  *VolumePoolMountPoint `json:"mountPoint,omitempty"`
 }
 
 type MultishareInstance struct {
@@ -193,9 +211,13 @@ type Service interface {
 	GetOp(ctx context.Context, op string) (*filev1beta1multishare.Operation, error)
 	IsOpDone(op *filev1beta1multishare.Operation) (bool, error)
 	ListOps(ctx context.Context, resource *ListFilter) ([]*filev1beta1multishare.Operation, error)
+	// Volume pool ops
+	CreateVolumePoolVolume(ctx context.Context, parentPool string, volumeID string) (*PoolVolume, error)
+	DeleteVolumePoolVolume(ctx context.Context, name string) error
 }
 
 type gcfsServiceManager struct {
+	httpClient        *http.Client
 	fileService       *filev1beta1.Service
 	instancesService  *filev1beta1.ProjectsLocationsInstancesService
 	operationsService *filev1beta1.ProjectsLocationsOperationsService
@@ -269,6 +291,7 @@ func NewGCFSService(version string, client *http.Client, primaryFilestoreService
 	klog.Infof("Using endpoint %q for multishare filestore", fileMultishareService.BasePath)
 
 	return &gcfsServiceManager{
+		httpClient:                       client,
 		fileService:                      fileService,
 		instancesService:                 filev1beta1.NewProjectsLocationsInstancesService(fileService),
 		operationsService:                filev1beta1.NewProjectsLocationsOperationsService(fileService),
@@ -288,7 +311,7 @@ func (manager *gcfsServiceManager) CreateInstance(ctx context.Context, obj *Serv
 				Name:             obj.Volume.Name,
 				CapacityGb:       util.RoundBytesToGb(obj.Volume.SizeBytes),
 				SourceBackup:     obj.BackupSource,
-				NfsExportOptions: extractNfsShareExportOptions(obj.NfsExportOptions),
+				NfsExportOptions: extractNfsShareExportOptions(obj.NfsExportOptions, obj.Network.Name),
 			},
 		},
 		Networks: []*filev1beta1.NetworkConfig{
@@ -1137,7 +1160,7 @@ func (manager *gcfsServiceManager) StartCreateShareOp(ctx context.Context, share
 		Labels:           share.Labels,
 		MountName:        share.MountPointName,
 		Backup:           share.BackupId,
-		NfsExportOptions: extractNfsShareExportOptions(share.NfsExportOptions),
+		NfsExportOptions: extractNfsShareExportOptions(share.NfsExportOptions, share.Parent.Network.Name),
 	}
 
 	op, err := manager.multishareInstancesSharesService.Create(instanceuri, targetshare).ShareId(share.Name).Context(ctx).Do()
@@ -1455,7 +1478,7 @@ func isMultishareVolId(volId string) bool {
 	return strings.Contains(volId, "modeMultishare")
 }
 
-func extractNfsShareExportOptions(options []*NfsExportOptions) []*filev1beta1multishare.NfsExportOptions {
+func extractNfsShareExportOptions(options []*NfsExportOptions, network string) []*filev1beta1multishare.NfsExportOptions {
 	var filerOpts []*filev1beta1multishare.NfsExportOptions
 	for _, opt := range options {
 		filerOpts = append(filerOpts,
@@ -1465,7 +1488,92 @@ func extractNfsShareExportOptions(options []*NfsExportOptions) []*filev1beta1mul
 				AnonUid:    opt.AnonUid,
 				IpRanges:   opt.IpRanges,
 				SquashMode: opt.SquashMode,
+				Network:    network,
 			})
 	}
 	return filerOpts
+}
+
+const (
+	betaBasePath = "v1beta1"
+)
+
+func (manager *gcfsServiceManager) executeRESTRequest(ctx context.Context, method, endpointURI string, reqBody interface{}) (*http.Response, error) {
+	basePath := manager.fileService.BasePath
+	if !strings.HasSuffix(basePath, "/") {
+		basePath += "/"
+	}
+	url := fmt.Sprintf("%s%s/%s", basePath, betaBasePath, endpointURI)
+
+	if reqBody != nil {
+		jsonBytes, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewBuffer(jsonBytes))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create http request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return manager.httpClient.Do(req)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create http request: %w", err)
+	}
+	return manager.httpClient.Do(req)
+}
+
+func (manager *gcfsServiceManager) CreateVolumePoolVolume(ctx context.Context, parentPool string, volumeID string) (*PoolVolume, error) {
+	endpointURI := fmt.Sprintf("%s/volumes?volumeId=%s", parentPool, volumeID)
+
+	// We purposefully populate the Description field to bypass a Google API Gateway
+	// REST-to-gRPC transcoding bug. The backend CreateVolumeRequest protobuf marks
+	// the `Volume` field as REQUIRED. If we send an empty Go struct `&VolumePoolVolume{}`,
+	// the JSON marshaler emits `{}`. The GCP API Gateway drops empty JSON brackets
+	// entirely, leading to a gRPC `nil` pointer for the Volume, which triggers:
+	// "INVALID_ARGUMENT: missing volume specification".
+	// Providing this description guarantees the gRPC `Volume` object is instantiated.
+	reqBody := &VolumePoolVolume{
+		Description: "Provisioned by GCP Filestore CSI driver",
+	}
+
+	resp, err := manager.executeRESTRequest(ctx, http.MethodPost, endpointURI, reqBody)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, googleapi.CheckResponse(resp)
+	}
+
+	var vol VolumePoolVolume
+	if err := json.NewDecoder(resp.Body).Decode(&vol); err != nil {
+		return nil, fmt.Errorf("failed to decode CreateVolume response: %w", err)
+	}
+
+	if vol.MountPoint == nil {
+		return nil, fmt.Errorf("volume %q created without mount details information", vol.Name)
+	}
+
+	return &PoolVolume{
+		Name:      vol.Name,
+		IpAddress: vol.MountPoint.IpAddress,
+		MountName: vol.MountPoint.MountName,
+	}, nil
+}
+
+func (manager *gcfsServiceManager) DeleteVolumePoolVolume(ctx context.Context, name string) error {
+	resp, err := manager.executeRESTRequest(ctx, http.MethodDelete, name, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		return googleapi.CheckResponse(resp)
+	}
+	return nil
 }

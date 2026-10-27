@@ -12,6 +12,7 @@ import (
 	filev1beta1 "google.golang.org/api/file/v1beta1"
 	"google.golang.org/api/option"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/googleapis/gax-go/v2/apierror"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/grpc/codes"
@@ -889,5 +890,174 @@ func TestIsUserError(t *testing.T) {
 				t.Errorf("test %v failed: got %v, expected %v", test.name, errCode, test.expectedErrCode)
 			}
 		})
+	}
+}
+
+func TestCreateVolumePoolVolume(t *testing.T) {
+	parentPool := "projects/test-project/locations/us-central1/volumePools/test-pool"
+	volID := "vol-123"
+
+	tests := []struct {
+		name         string
+		responseCode int
+		responseBody *VolumePoolVolume
+		expectErr    bool
+		expected     *PoolVolume
+	}{
+		{
+			name:         "successful create VolumePool volume",
+			responseCode: http.StatusOK,
+			responseBody: &VolumePoolVolume{
+				Name: fmt.Sprintf("%s/volumes/%s", parentPool, volID),
+				MountPoint: &VolumePoolMountPoint{
+					IpAddress: "10.0.0.1",
+					MountName: "vol_123",
+				},
+			},
+			expected: &PoolVolume{
+				Name:      fmt.Sprintf("%s/volumes/%s", parentPool, volID),
+				IpAddress: "10.0.0.1",
+				MountName: "vol_123",
+			},
+		},
+		{
+			name:         "api error response",
+			responseCode: http.StatusBadRequest,
+			expectErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				expectedPath := fmt.Sprintf("/v1beta1/%s/volumes", parentPool)
+				if r.URL.Path != expectedPath {
+					t.Errorf("expected URL path %q, got %q", expectedPath, r.URL.Path)
+				}
+				if r.Method != http.MethodPost {
+					t.Errorf("expected method %s, got %s", http.MethodPost, r.Method)
+				}
+				if r.URL.Query().Get("volumeId") != volID {
+					t.Errorf("expected volumeId %q, got %q", volID, r.URL.Query().Get("volumeId"))
+				}
+
+				if tc.responseBody != nil {
+					var reqBody VolumePoolVolume
+					if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+						t.Errorf("failed to decode request body: %v", err)
+					}
+				}
+
+				w.WriteHeader(tc.responseCode)
+				json.NewEncoder(w).Encode(tc.responseBody)
+			}))
+			defer server.Close()
+
+			ctx := context.Background()
+			fileService, err := filev1beta1.NewService(ctx, option.WithHTTPClient(server.Client()))
+			if err != nil {
+				t.Fatalf("failed to create service client: %v", err)
+			}
+			fileService.BasePath = server.URL + "/"
+
+			manager := &gcfsServiceManager{
+				fileService: fileService,
+				httpClient:  server.Client(),
+			}
+
+			resp, err := manager.CreateVolumePoolVolume(ctx, parentPool, volID)
+			if tc.expectErr {
+				if err == nil {
+					t.Errorf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if diff := cmp.Diff(resp, tc.expected); diff != "" {
+				t.Errorf("unexpected volume pool: %s", diff)
+			}
+		})
+	}
+}
+
+func TestDeleteVolumePoolVolume(t *testing.T) {
+	name := "projects/test-project/locations/us-central1/volumePools/test-pool/volumes/vol-123"
+
+	tests := []struct {
+		testName     string
+		responseCode int
+		expectErr    bool
+	}{
+		{
+			testName:     "successful release",
+			responseCode: http.StatusOK,
+		},
+		{
+			testName:     "api error response",
+			responseCode: http.StatusBadRequest,
+			expectErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.testName, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				expectedPath := fmt.Sprintf("/v1beta1/%s", name)
+				if r.URL.Path != expectedPath {
+					t.Errorf("expected URL path %q, got %q", expectedPath, r.URL.Path)
+				}
+				if r.Method != http.MethodDelete {
+					t.Errorf("expected method %s, got %s", http.MethodDelete, r.Method)
+				}
+
+				w.WriteHeader(tc.responseCode)
+			}))
+			defer server.Close()
+
+			ctx := context.Background()
+			fileService, err := filev1beta1.NewService(ctx, option.WithHTTPClient(server.Client()))
+			if err != nil {
+				t.Fatalf("failed to create service client: %v", err)
+			}
+			fileService.BasePath = server.URL + "/"
+
+			manager := &gcfsServiceManager{
+				fileService: fileService,
+				httpClient:  server.Client(),
+			}
+
+			err = manager.DeleteVolumePoolVolume(ctx, name)
+			if tc.expectErr {
+				if err == nil {
+					t.Errorf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestExtractNfsShareExportOptionsSetsSourceNetwork(t *testing.T) {
+	const network = "projects/test-project/global/networks/test-network"
+
+	got := extractNfsShareExportOptions(
+		[]*NfsExportOptions{
+			{
+				IpRanges: []string{"10.0.0.0/24"},
+			},
+		},
+		network,
+	)
+
+	if len(got) != 1 {
+		t.Fatalf("got %d options, want 1", len(got))
+	}
+	if got[0].Network != network {
+		t.Errorf("got network %q, want %q", got[0].Network, network)
 	}
 }
