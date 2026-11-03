@@ -14,7 +14,7 @@ require (
 	github.com/onsi/gomega v1.18.1
 	github.com/spf13/cobra v1.4.0
 	github.com/spf13/pflag v1.0.5
-	golang.org/x/net v0.25.0
+	golang.org/x/net v1.26.9
 	golang.org/x/oauth2 v0.0.0-20220722155238-128564f6959c
 	golang.org/x/sys v0.30.0
 	google.golang.org/api v0.90.0
