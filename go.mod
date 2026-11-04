@@ -15,7 +15,7 @@ require (
 	github.com/prashanthpai/sunrpc v0.0.0-20210303180433-689a3880d90a
 	github.com/spf13/cobra v1.6.0
 	github.com/spf13/pflag v1.0.5
-	golang.org/x/net v0.25.0
+	golang.org/x/net v1.26.9
 	golang.org/x/oauth2 v0.11.0
 	golang.org/x/sys v0.30.0
 	google.golang.org/api v0.138.0
